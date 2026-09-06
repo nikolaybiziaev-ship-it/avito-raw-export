@@ -154,6 +154,8 @@ def test_full_mock_export(tmp_path: Path):
         ExportOptions(export_root=tmp_path, download_avito_media=False),
     )
     exporter.client.close()
+    exporter.options.statistics = False
+    exporter.options.download_voice = True
     fake = FakeClient()
     exporter.client = fake
     result = exporter.run()

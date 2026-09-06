@@ -189,21 +189,14 @@ def build_page() -> None:
             ).classes("text-sm opacity-70")
 
             with ui.row().classes("gap-6"):
-                download_voice = ui.checkbox("Скачивать голосовые", value=True)
-                download_media = ui.checkbox(
-                    "Скачивать доступные Avito-медиа", value=True
-                )
-
-            ui.separator()
-            ui.label("Этапы").classes("font-medium")
+                opt_chats = ui.checkbox("Чаты и сообщения", value=True)
+                opt_reviews = ui.checkbox("Отзывы", value=True)
+                opt_statistics = ui.checkbox("Статистика", value=True)
             with ui.row().classes("gap-6"):
-                opt_items = ui.checkbox("Все статусы объявлений", value=True)
-                opt_item_details = ui.checkbox("Карточки объявлений", value=True)
-                opt_global_chats = ui.checkbox("Глобальный список чатов", value=True)
-                opt_by_item = ui.checkbox("Доп. поиск чатов по объявлениям", value=True)
-                opt_chat_details = ui.checkbox("Полные объекты чатов", value=True)
-                opt_messages = ui.checkbox("Все доступные сообщения", value=True)
-                opt_reviews = ui.checkbox("Рейтинг и все доступные отзывы", value=True)
+                download_media = ui.checkbox(
+                    "Скачивать изображения и медиа", value=False
+                )
+                download_voice = ui.checkbox("Скачивать голосовые", value=False)
 
         with ui.card().classes("w-full"):
             ui.label("3. Процесс").classes("text-lg font-bold")
@@ -216,6 +209,7 @@ def build_page() -> None:
                 chat_counter = ui.label("Чаты: 0")
                 message_counter = ui.label("Сообщения: 0")
                 review_counter = ui.label("Отзывы: 0")
+                statistics_counter = ui.label("Статистика: 0 записей / 0 периодов")
                 media_counter = ui.label("Медиа: 0")
                 error_counter = ui.label("Ошибки: 0")
                 warning_counter = ui.label("Предупреждения: 0")
@@ -260,12 +254,13 @@ def build_page() -> None:
                     resume_from=selected,
                     download_voice=bool(download_voice.value),
                     download_avito_media=bool(download_media.value),
-                    list_items=bool(opt_items.value),
-                    item_details=bool(opt_item_details.value),
-                    global_chats=bool(opt_global_chats.value),
-                    chats_by_item=bool(opt_by_item.value),
-                    chat_details=bool(opt_chat_details.value),
-                    messages=bool(opt_messages.value),
+                    statistics=bool(opt_statistics.value),
+                    list_items=True,
+                    item_details=True,
+                    global_chats=bool(opt_chats.value),
+                    chats_by_item=bool(opt_chats.value),
+                    chat_details=bool(opt_chats.value),
+                    messages=bool(opt_chats.value),
                     ratings_and_reviews=bool(opt_reviews.value),
                 )
                 state.running = True
@@ -332,11 +327,14 @@ def build_page() -> None:
                 "connection": 0.03,
                 "items": 0.10,
                 "item_details": 0.20,
-                "chats_global": 0.30,
-                "chats_by_item": 0.45,
-                "ratings": 0.58,
-                "chat_details": 0.62,
-                "messages": 0.72,
+                "statistics_discovery": 0.25,
+                "statistics_backfill": 0.38,
+                "statistics_done": 0.52,
+                "chats_global": 0.55,
+                "chats_by_item": 0.64,
+                "ratings": 0.70,
+                "chat_details": 0.75,
+                "messages": 0.82,
                 "voice": 0.90,
                 "media": 0.94,
                 "done": 1.0,
@@ -362,6 +360,10 @@ def build_page() -> None:
                             f"Сообщения: {data.get('messages_seen', 0)}"
                         )
                         review_counter.text = f"Отзывы: {data.get('reviews_seen', 0)}"
+                        statistics_counter.text = (
+                            f"Статистика: {data.get('statistics_records', 0)} записей / "
+                            f"{data.get('statistics_periods', 0)} периодов"
+                        )
                         media_counter.text = f"Медиа: {data.get('media_files', 0)}"
                         error_counter.text = f"Ошибки: {data.get('errors', 0)}"
                         warning_counter.text = (
@@ -421,7 +423,9 @@ def build_page() -> None:
 - метаданные каждого сохранённого ответа (`*.meta.json`);
 - найденные ID объявлений, чатов и отзывов в `index/`;
 - рейтинг и все доступные страницы опубликованных отзывов в `raw/ratings/`;
-- доступные голосовые и Avito-медиа в `media/`;
+- дневная статистика объявлений, аккаунта и расходов в RAW и SQLite;
+- ссылки и метаданные медиа остаются в RAW без изменений;
+- изображения, медиа и голосовые скачиваются только при включении опций;
 - `manifest.json` со счётчиками и границами истории;
 - ошибки и журнал запросов без токенов/секретов.
 
@@ -442,6 +446,9 @@ def _stage_name(stage: str) -> str:
         "connection": "Подключение к Avito",
         "items": "Получение объявлений",
         "item_details": "Карточки объявлений",
+        "statistics_discovery": "Подготовка исторической статистики",
+        "statistics_backfill": "Историческая статистика",
+        "statistics_done": "Статистика сохранена",
         "chats_global": "Глобальный поиск чатов",
         "chats_by_item": "Поиск чатов через объявления",
         "ratings": "Рейтинг и отзывы",

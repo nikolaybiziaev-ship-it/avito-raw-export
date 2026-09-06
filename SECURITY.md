@@ -18,10 +18,12 @@ live in the OS user configuration directory; secrets use OS keyring with no
 plaintext fallback. Export archives are private, unencrypted user data and can
 contain temporary signed media URLs. Keep them outside the checkout.
 
-OAuth response bodies are never archived. Data GET responses, including errors,
+OAuth response bodies are never archived. Approved data GET responses and the two
+read-only Statistics API POST responses, including errors,
 are preserved without JSON rewriting; response cookies are redacted in metadata.
-The API client accepts only explicitly approved read endpoints. OAuth token POST
-is the sole POST. Media use HTTPS Avito domain boundaries and checked redirects;
+The API client accepts only explicitly approved endpoints. Data POST is restricted
+to `/stats/v2/accounts/{user_id}/items` and `/spendings`; other POST paths are
+rejected before network access. Media use HTTPS Avito domain boundaries and checked redirects;
 external URLs remain in RAW JSON and are not downloaded.
 
 

@@ -17,6 +17,7 @@ from .client import AvitoApiError, AvitoClient, RawResponse, is_avito_media_url
 from .store import ExportStore, atomic_json, atomic_bytes, replace_file
 from .identifiers import valid_chat_id, chat_segment, file_id
 from .recovery import Journal, ReplayClient, digest_file
+from .statistics import StatisticsBackfill
 
 ITEM_STATUSES = ("active", "removed", "old", "blocked", "rejected")
 CHAT_TYPES = (None, "u2i", "u2u", "a2u")
@@ -25,8 +26,9 @@ CHAT_TYPES = (None, "u2i", "u2u", "a2u")
 @dataclass(slots=True)
 class ExportOptions:
     export_root: Path
-    download_voice: bool = True
-    download_avito_media: bool = True
+    download_voice: bool = False
+    download_avito_media: bool = False
+    statistics: bool = True
     list_items: bool = True
     item_details: bool = True
     global_chats: bool = True
@@ -50,6 +52,8 @@ class ExportStats:
     errors: int = 0
     warnings: int = 0
     failed_media: int = 0
+    statistics_records: int = 0
+    statistics_periods: int = 0
     oldest_message: int | None = None
     newest_message: int | None = None
     stage: str = ""
@@ -139,7 +143,7 @@ class Exporter:
                 self._log(
                     "Восстановление после остановки: проверяю локальные RAW и файлы"
                 )
-            self.store.manifest.update(format="avito-raw-export-v2", status="running")
+            self.store.manifest.update(format="avito-raw-export-v3", status="running")
             self.store.manifest.setdefault("stages", {})
             self.store.manifest.setdefault(
                 "legacy_counts", dict(self.store.manifest["counts"])
@@ -224,6 +228,8 @@ class Exporter:
                 self._export_ratings_and_reviews()
             if self.options.item_details:
                 self._export_item_details()
+            if self.options.statistics:
+                StatisticsBackfill(self).run()
             if self.options.global_chats:
                 self._discover_global_chats()
             if self.options.chats_by_item:
@@ -966,10 +972,15 @@ class Exporter:
         counts = self.store.manifest["counts"]
         if self.journal:
             counts.update(self.journal.counts())
+            periods, records = self.journal.statistics_counts()
+            counts["statistics_periods"] = periods
+            counts["statistics_records"] = records
             self.stats.errors = counts["errors"]
             self.stats.warnings = counts["warnings"]
             self.stats.failed_media = counts["failed_media"]
             self.stats.media_files = counts["media_files"]
+            self.stats.statistics_periods = periods
+            self.stats.statistics_records = records
         self.stats.items = len(self.item_ids)
         self.stats.chats = len(self.chat_ids)
         counts.update(
@@ -981,6 +992,8 @@ class Exporter:
                 "review_pages": self.stats.review_pages,
                 "reviews_seen": self.stats.reviews_seen,
                 "unique_reviews": len(self.review_ids),
+                "statistics_periods": self.stats.statistics_periods,
+                "statistics_records": self.stats.statistics_records,
                 "media_files": self.store.manifest["counts"].get("media_files", 0),
                 "errors": self.store.manifest["counts"].get("errors", 0),
             }

@@ -9,7 +9,12 @@ def make_exporter(tmp_path, fake):
     exporter = Exporter(
         "test-client",
         "test-secret",
-        ExportOptions(tmp_path, download_voice=False, download_avito_media=False),
+        ExportOptions(
+            tmp_path,
+            download_voice=False,
+            download_avito_media=False,
+            statistics=False,
+        ),
     )
     exporter.client.close()
     exporter.client = fake

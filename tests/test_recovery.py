@@ -14,6 +14,7 @@ from test_exporter import FakeClient, raw
 
 
 def make(tmp_path, client, resume=None, **options):
+    options.setdefault("statistics", False)
     exporter = Exporter(
         "synthetic-client",
         "synthetic-secret",
@@ -89,7 +90,12 @@ def test_resume_interrupted_media_skips_verified_file(tmp_path):
                 raise KeyboardInterrupt("interruption during second file")
             return super().download(url)
 
-    first = make(tmp_path, MediaClient(), download_voice=False)
+    first = make(
+        tmp_path,
+        MediaClient(),
+        download_voice=False,
+        download_avito_media=True,
+    )
     with pytest.raises(KeyboardInterrupt):
         first.run()
     second_client = FakeClient()
@@ -160,7 +166,7 @@ def test_partial_voice_uses_singletons_and_records_missing(tmp_path):
                 )
             return super().get(path, params=params)
 
-    first = make(tmp_path, Client())
+    first = make(tmp_path, Client(), download_voice=True)
     first.run()
     assert first.stats.errors == 0 and first.stats.warnings == 1
     second_client = Client()

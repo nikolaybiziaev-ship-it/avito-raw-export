@@ -96,3 +96,35 @@ Known limits: replay rebuilds local indexes before reaching missing network work
 offset pages are not a consistent live snapshot; public API ceilings remain explicit
 limitations. An abruptly killed process may leave `running`, which is resumable.
 The streaming implementation supersedes the v0.1 memory-buffering limitation above.
+
+# v0.3 historical statistics audit
+
+The public Avito Statistics API v2 contract was reviewed on 2026-09-06. The
+read-only allowlist now includes only its two POST resources: account/item
+indicators and account spendings. No mutation endpoint was added.
+
+The exporter requests all 35 documented item metrics. It retains per-item daily
+detail through one-day `totals` windows, account daily groupings in 90-day
+windows, and daily spendings with service detail in 90-day windows. Documented
+horizons are 270 days for indicators and 510 days for spendings. Item result
+pagination uses limit 1000 and offset until `dataTotalCount`.
+
+All HTTP attempts remain byte-preserved in `raw/requests`; successful statistics
+responses also receive thematic paths. `statistics_windows` and
+`statistics_records` in the private recovery database provide transactional,
+deduplicated checkpoints and a normalized analytical layer. Resume skips only
+fully committed windows. Requests are paced below the documented 100/minute;
+429 headers, bounded 5xx/network retries, and deterministic 4xx handling were
+tested.
+
+The UI now exposes the standard stages as chats/messages, reviews, and
+statistics. Binary media and voice are independent opt-in features and default
+off. Disabled binary stages cannot make the result partial. Counters include
+statistics records and completed periods, and the current date window remains
+visible during long backfills.
+
+Local validation passed 81 tests on Python 3.14 before release documentation was
+updated. Tests cover empty/malformed data, single/multiple windows, interruption,
+resume without duplicate calls, atomic rollback, documented horizons, HTTP 429,
+deterministic 4xx, v0.2 archive opening, and a complete export without media.
+No v0.3 full live export or real-account statistics were used.

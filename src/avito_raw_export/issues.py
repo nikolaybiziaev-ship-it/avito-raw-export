@@ -21,6 +21,8 @@ def classify(where, error):
         return "unavailable_by_api", "foreign_item", False
     if status in (403, 404, 410):
         return "unavailable_by_api", f"http_{status}", False
+    if where == "statistics-window" and status in (400, 422):
+        return "unavailable_by_api", f"http_{status}", False
     if (
         status == 429
         or (status is not None and status >= 500)

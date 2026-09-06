@@ -78,6 +78,8 @@ class ExportStore:
                 "review_pages": 0,
                 "reviews_seen": 0,
                 "unique_reviews": 0,
+                "statistics_records": 0,
+                "statistics_periods": 0,
                 "media_files": 0,
                 "errors": 0,
             },
@@ -98,6 +100,7 @@ class ExportStore:
         if self.manifest.get("format") not in (
             "avito-raw-export-v1",
             "avito-raw-export-v2",
+            "avito-raw-export-v3",
         ):
             raise ValueError("Unsupported archive format")
         self.raw, self.media, self.logs, self.index = [
@@ -128,7 +131,7 @@ class ExportStore:
         self.write_manifest()
 
     def record_request(self, raw: RawResponse) -> None:
-        if raw.method != "GET":
+        if raw.method not in ("GET", "POST"):
             return
         self._request_seq += 1
         # Preserve failed/retried responses too, before parsing or raising.

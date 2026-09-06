@@ -57,7 +57,7 @@ class AvitoClient:
             base_url=API_BASE,
             timeout=timeout,
             follow_redirects=False,
-            headers={"User-Agent": "avito-raw-export/0.2"},
+            headers={"User-Agent": "avito-raw-export/0.3"},
         )
 
     def close(self) -> None:
@@ -165,6 +165,69 @@ class AvitoClient:
             body=last.content.decode("utf-8", errors="replace"),
         )
 
+    def post(self, path: str, *, json_body: Any, attempts: int = 5) -> RawResponse:
+        """Call one of the explicitly approved read-only POST statistics methods."""
+        allowed = (
+            r"/stats/v2/accounts/\d+/items",
+            r"/stats/v2/accounts/\d+/spendings",
+        )
+        if not any(re.fullmatch(pattern, path) for pattern in allowed):
+            raise ValueError("Endpoint is not in the read-only allowlist")
+        if attempts < 1:
+            raise ValueError("attempts must be positive")
+        if not isinstance(json_body, dict):
+            raise ValueError("JSON body must be an object")
+        if not self._token:
+            self.authenticate()
+        account_id = path.split("/accounts/", 1)[1].split("/", 1)[0]
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "X-AgencyClientId": account_id,
+        }
+        last: RawResponse | None = None
+        refreshed = False
+        for attempt in range(attempts):
+            try:
+                response = self._http.post(path, json=json_body, headers=headers)
+            except httpx.TransportError:
+                if attempt == attempts - 1:
+                    raise AvitoApiError("Network error after retries") from None
+                time.sleep(min(2**attempt, 20))
+                continue
+            # RawResponse.params carries the request body so RAW metadata and replay keys
+            # retain the exact statistics query without introducing another archive field.
+            raw = self._raw("POST", response, params=json_body)
+            last = raw
+            if response.status_code == 401 and not refreshed and attempt < attempts - 1:
+                refreshed = True
+                self.authenticate()
+                headers = {
+                    "Authorization": f"Bearer {self._token}",
+                    "X-AgencyClientId": account_id,
+                }
+                continue
+            if response.status_code == 429:
+                if attempt < attempts - 1:
+                    time.sleep(retry_delay(response.headers, attempt))
+                continue
+            if response.status_code >= 500:
+                if attempt < attempts - 1:
+                    time.sleep(retry_delay(response.headers, attempt))
+                continue
+            if response.status_code >= 300:
+                raise AvitoApiError(
+                    f"Avito API: HTTP {response.status_code} для POST {path}",
+                    status_code=response.status_code,
+                    body=response.content.decode("utf-8", errors="replace"),
+                )
+            return raw
+        assert last is not None
+        raise AvitoApiError(
+            f"Avito API не ответил успешно после {attempts} попыток: POST {path}",
+            status_code=last.status_code,
+            body=last.content.decode("utf-8", errors="replace"),
+        )
+
     def download(self, url: str, *, attempts: int = 3) -> RawResponse:
         if attempts < 1:
             raise ValueError("attempts must be positive")
@@ -174,7 +237,7 @@ class AvitoClient:
         with httpx.Client(
             timeout=60.0,
             follow_redirects=False,
-            headers={"User-Agent": "avito-raw-export/0.2"},
+            headers={"User-Agent": "avito-raw-export/0.3"},
         ) as client:
             for attempt in range(attempts):
                 try:
@@ -221,7 +284,7 @@ class AvitoClient:
         with httpx.Client(
             timeout=httpx.Timeout(60, connect=20),
             follow_redirects=False,
-            headers={"User-Agent": "avito-raw-export/0.2"},
+            headers={"User-Agent": "avito-raw-export/0.3"},
         ) as client:
             for attempt in range(attempts):
                 target = url

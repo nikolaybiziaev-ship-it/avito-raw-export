@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
@@ -38,6 +39,18 @@ class Journal:
             CREATE TABLE IF NOT EXISTS requests (key TEXT PRIMARY KEY, path TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS media (key TEXT PRIMARY KEY, status TEXT, path TEXT, digest TEXT, bytes INTEGER, reason TEXT);
             CREATE TABLE IF NOT EXISTS issues (key TEXT PRIMARY KEY, category TEXT, reason TEXT, is_error INTEGER, active INTEGER, context TEXT);
+            CREATE TABLE IF NOT EXISTS statistics_windows (
+                key TEXT PRIMARY KEY, endpoint TEXT NOT NULL, date_from TEXT NOT NULL,
+                date_to TEXT NOT NULL, state TEXT NOT NULL, rows INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL, error TEXT
+            );
+            CREATE TABLE IF NOT EXISTS statistics_records (
+                source_endpoint TEXT NOT NULL, window_from TEXT NOT NULL,
+                window_to TEXT NOT NULL, grouping_type TEXT NOT NULL,
+                record_id TEXT NOT NULL, metric TEXT NOT NULL, value TEXT,
+                fetched_at TEXT NOT NULL,
+                PRIMARY KEY(source_endpoint, window_from, window_to, grouping_type, record_id, metric)
+            );
         """)
 
     def close(self):
@@ -262,6 +275,60 @@ class Journal:
             [{"category": c, "reason": r, "count": n} for c, r, n in rows],
         )
 
+    def statistics_done(self, key):
+        row = self.db.execute(
+            "SELECT state FROM statistics_windows WHERE key=?", (key,)
+        ).fetchone()
+        return bool(row and row[0] == "done")
+
+    def statistics_commit(self, key, endpoint, date_from, date_to, records):
+        """Atomically commit a complete normalized window and its checkpoint."""
+        fetched_at = datetime.now(UTC).isoformat()
+        with self.db:
+            for row in records:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO statistics_records VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        endpoint,
+                        date_from,
+                        date_to,
+                        str(row["grouping_type"]),
+                        str(row["record_id"]),
+                        str(row["metric"]),
+                        json.dumps(row.get("value"), ensure_ascii=False),
+                        fetched_at,
+                    ),
+                )
+            self.db.execute(
+                "INSERT OR REPLACE INTO statistics_windows VALUES (?,?,?,?,?,?,?,NULL)",
+                (key, endpoint, date_from, date_to, "done", len(records), fetched_at),
+            )
+
+    def statistics_failed(self, key, endpoint, date_from, date_to, error):
+        with self.db:
+            self.db.execute(
+                "INSERT OR REPLACE INTO statistics_windows VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    key,
+                    endpoint,
+                    date_from,
+                    date_to,
+                    "failed",
+                    0,
+                    datetime.now(UTC).isoformat(),
+                    type(error).__name__,
+                ),
+            )
+
+    def statistics_counts(self):
+        periods = self.db.execute(
+            "SELECT count(*) FROM statistics_windows WHERE state='done'"
+        ).fetchone()[0]
+        records = self.db.execute(
+            "SELECT count(*) FROM statistics_records"
+        ).fetchone()[0]
+        return periods, records
+
 
 class ReplayClient:
     def __init__(self, network, journal):
@@ -305,6 +372,29 @@ class ReplayClient:
             )
         return raw
 
+    def post(self, path, *, json_body, attempts=5):
+        raw = self.journal.cached(path, json_body)
+        if raw is not None:
+            self.reused += 1
+            if raw.status_code >= 300:
+                raise AvitoApiError(
+                    f"Cached API response: HTTP {raw.status_code}",
+                    status_code=raw.status_code,
+                    body=raw.content.decode("utf-8", errors="replace"),
+                )
+            return raw
+        raw = self.network.post(path, json_body=json_body, attempts=attempts)
+        raw.params = json_body
+        if self.journal.cached(path, json_body) is None:
+            self.journal.store.record_request(raw)
+            self.journal.index_response(
+                raw,
+                self.journal.store.raw
+                / "requests"
+                / f"{self.journal.store._request_seq:07d}.json",
+            )
+        return raw
+
     def download(self, url, **kwargs):
         return self.network.download(url, **kwargs)
 
@@ -329,6 +419,7 @@ def unfinished_exports(root: Path):
             if manifest.get("format") in (
                 "avito-raw-export-v1",
                 "avito-raw-export-v2",
+                "avito-raw-export-v3",
             ) and manifest.get("status") in (
                 "running",
                 "partial",

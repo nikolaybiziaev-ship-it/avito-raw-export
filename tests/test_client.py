@@ -23,6 +23,15 @@ def test_reject_unapproved_paths(path):
             client.get(path)
 
 
+def test_post_rejects_every_non_statistics_endpoint():
+    with AvitoClient("test-client", "test-secret") as client:
+        with pytest.raises(ValueError):
+            client.post(
+                "/messenger/v1/accounts/1/chats/x/messages",
+                json_body={"message": "must never be sent"},
+            )
+
+
 @pytest.mark.parametrize(
     "url",
     [
