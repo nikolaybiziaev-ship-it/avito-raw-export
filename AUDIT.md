@@ -45,7 +45,11 @@ No real Avito credentials or real account data were used in this audit.
 - UI rendered at localhost; empty-key validation worked. A separate temporary
   UI test server completed all export stages with synthetic responses and zero
   errors; its private test artifacts are ignored and not published.
-- PyInstaller Windows build completed successfully. Build outputs are ignored.
+- PyInstaller Windows build completed successfully; its EXE rendered the UI.
+  Build outputs are ignored.
+- The initial Linux CI run passed 42 tests but found an outdated preinstalled
+  setuptools. Installers and CI now upgrade build tools; the build requirement
+  is setuptools 83 or newer.
 
 ## Limits requiring a real account
 

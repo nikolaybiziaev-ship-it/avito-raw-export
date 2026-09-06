@@ -7,7 +7,7 @@ if not exist .venv (
 )
 call .venv\Scripts\activate.bat
 if errorlevel 1 exit /b 1
-python -m pip install -q --upgrade pip
+python -m pip install -q --upgrade pip setuptools wheel
 python -m pip install -q -e .
 if errorlevel 1 exit /b 1
 python -m avito_raw_export
