@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "avito-raw-export"
+version = "0.1.0"
+description = "Read-only local UI for maximum raw export of data available through Avito Business API."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "Avito Raw Export contributors"}]
+dependencies = [
+  "nicegui>=3.16,<4",
+  "httpx>=0.27,<1",
+  "keyring>=25,<26",
+  "platformdirs>=4,<5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=9.0.3,<10", "respx>=0.21,<1", "ruff>=0.16,<1"]
+build = ["pyinstaller>=6,<7"]
+
+[project.scripts]
+avito-raw-export = "avito_raw_export.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

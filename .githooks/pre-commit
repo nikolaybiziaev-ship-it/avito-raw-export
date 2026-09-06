@@ -1,0 +1,5 @@
+#!/bin/sh
+if [ -x .venv/Scripts/python.exe ]; then
+  exec .venv/Scripts/python.exe scripts/check_public.py
+fi
+exec python scripts/check_public.py
