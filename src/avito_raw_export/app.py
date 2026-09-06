@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 import json
 import os
 import queue
@@ -13,11 +14,16 @@ from typing import Any
 from nicegui import ui, app as nice_app
 from platformdirs import user_documents_dir
 
+import avito_raw_export
+from . import __version__
 from .client import AvitoClient
+from . import client as client_module
 from .recovery import unfinished_exports
 from .store import atomic_json
 from .config import Profile, ProfileStore
 from .exporter import Exporter, ExportOptions, ExportStats
+
+BUILD_MARKER = "Avito Raw Export v0.3.1 — build b4e51b2"
 
 
 class AppState:
@@ -57,9 +63,14 @@ def build_page() -> None:
 
     with ui.header().classes("items-center justify-between"):
         ui.label("Avito Raw Export").classes("text-xl font-bold")
-        ui.label("read-only • raw archive").classes("text-sm opacity-70")
+        with ui.column().classes("items-end gap-0"):
+            ui.label("read-only • raw archive").classes("text-sm opacity-70")
+            ui.label(BUILD_MARKER).classes("text-xs font-mono text-yellow-200")
 
     with ui.column().classes("w-full max-w-5xl mx-auto p-4 gap-4"):
+        ui.label(BUILD_MARKER).classes(
+            "w-full rounded bg-yellow-100 text-yellow-900 px-3 py-2 font-mono"
+        )
         ui.label("Максимальная сырая выгрузка данных Avito API").classes(
             "text-2xl font-bold"
         )
@@ -436,9 +447,34 @@ def build_page() -> None:
 
 def main() -> None:
     ui.page("/")(build_page)
+    nice_app.get("/_diagnostics/runtime")(runtime_diagnostics)
     ui.run(
         title="Avito Raw Export", host="127.0.0.1", reload=False, show=True, port=8765
     )
+
+
+def runtime_diagnostics() -> dict[str, Any]:
+    try:
+        package_version = importlib.metadata.version("avito-raw-export")
+    except importlib.metadata.PackageNotFoundError:
+        package_version = None
+    try:
+        client_source = Path(client_module.__file__ or "").read_text(encoding="utf-8")
+    except OSError:
+        client_source = ""
+    return {
+        "build_marker": BUILD_MARKER,
+        "module_version": __version__,
+        "package_version": package_version,
+        "executable": sys.executable,
+        "cwd": os.getcwd(),
+        "package_file": avito_raw_export.__file__,
+        "client_file": client_module.__file__,
+        "legacy_oauth_message_present": (
+            ("OAuth network error " + "after retries") in client_source
+        ),
+        "sys_path": sys.path,
+    }
 
 
 def _stage_name(stage: str) -> str:
