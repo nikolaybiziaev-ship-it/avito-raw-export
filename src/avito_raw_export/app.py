@@ -23,8 +23,6 @@ from .store import atomic_json
 from .config import Profile, ProfileStore
 from .exporter import Exporter, ExportOptions, ExportStats
 
-BUILD_MARKER = "Avito Raw Export v0.3.1 — build b4e51b2"
-
 
 class AppState:
     def __init__(self) -> None:
@@ -59,16 +57,17 @@ def open_folder(path: Path) -> None:
 
 def build_page() -> None:
     state = AppState()
+    marker = build_marker()
     ui.page_title("Avito Raw Export")
 
     with ui.header().classes("items-center justify-between"):
         ui.label("Avito Raw Export").classes("text-xl font-bold")
         with ui.column().classes("items-end gap-0"):
             ui.label("read-only • raw archive").classes("text-sm opacity-70")
-            ui.label(BUILD_MARKER).classes("text-xs font-mono text-yellow-200")
+            ui.label(marker).classes("text-xs font-mono text-yellow-200")
 
     with ui.column().classes("w-full max-w-5xl mx-auto p-4 gap-4"):
-        ui.label(BUILD_MARKER).classes(
+        ui.label(marker).classes(
             "w-full rounded bg-yellow-100 text-yellow-900 px-3 py-2 font-mono"
         )
         ui.label("Максимальная сырая выгрузка данных Avito API").classes(
@@ -463,7 +462,7 @@ def runtime_diagnostics() -> dict[str, Any]:
     except OSError:
         client_source = ""
     return {
-        "build_marker": BUILD_MARKER,
+        "build_marker": build_marker(),
         "module_version": __version__,
         "package_version": package_version,
         "executable": sys.executable,
@@ -475,6 +474,20 @@ def runtime_diagnostics() -> dict[str, Any]:
         ),
         "sys_path": sys.path,
     }
+
+
+def build_marker() -> str:
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "--short=7", "HEAD"],
+            check=True,
+            cwd=Path(__file__).resolve().parents[2],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        head = "unknown"
+    return f"Avito Raw Export v{__version__} — build {head}"
 
 
 def _stage_name(stage: str) -> str:
