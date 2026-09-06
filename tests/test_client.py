@@ -136,3 +136,38 @@ def test_oauth_retry_and_late_401_refresh(monkeypatch):
         assert client.get("/core/v1/accounts/self").json()["id"] == 1
     assert auth.call_count == 4
     assert route.calls[-1].request.headers["Authorization"] == "Bearer fake-second"
+
+
+@pytest.mark.parametrize(
+    ("exc", "message"),
+    [
+        (httpx.ConnectTimeout("timed out"), "OAuth connect timeout"),
+        (httpx.ReadTimeout("timed out"), "OAuth read timeout"),
+        (httpx.ProxyError("proxy failed"), "OAuth proxy error"),
+        (httpx.ConnectError("[Errno 11001] getaddrinfo failed"), "OAuth DNS error"),
+        (httpx.ConnectError("certificate verify failed"), "OAuth TLS error"),
+        (httpx.ConnectError("connection failed"), "OAuth connect error"),
+        (httpx.RemoteProtocolError("server disconnected"), "OAuth connection reset"),
+    ],
+)
+@respx.mock
+def test_oauth_transport_errors_are_classified(monkeypatch, exc, message):
+    monkeypatch.setattr("avito_raw_export.client.time.sleep", lambda _: None)
+    route = respx.post("https://api.avito.ru/token").mock(side_effect=exc)
+    with AvitoClient("test-client", "test-secret") as client:
+        with pytest.raises(AvitoApiError, match=message):
+            client.authenticate()
+    assert route.call_count == 5
+
+
+@respx.mock
+def test_oauth_server_retry_exhaustion_is_classified(monkeypatch):
+    monkeypatch.setattr("avito_raw_export.client.time.sleep", lambda _: None)
+    route = respx.post("https://api.avito.ru/token").mock(
+        return_value=httpx.Response(503)
+    )
+    with AvitoClient("test-client", "test-secret") as client:
+        with pytest.raises(AvitoApiError, match="OAuth HTTP 5xx") as err:
+            client.authenticate()
+    assert err.value.status_code == 503
+    assert route.call_count == 5

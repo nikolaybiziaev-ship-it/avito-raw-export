@@ -80,16 +80,20 @@ class AvitoClient:
                         "client_secret": self.client_secret,
                     },
                 )
-            except httpx.TransportError:
+            except httpx.TransportError as exc:
                 if attempt == 4:
-                    raise AvitoApiError("OAuth network error after retries") from None
+                    raise AvitoApiError(oauth_transport_error_message(exc)) from None
                 time.sleep(min(2**attempt, 20))
                 continue
-            if (
-                response.status_code == 429 or response.status_code >= 500
-            ) and attempt < 4:
-                time.sleep(min(2**attempt, 20))
-                continue
+            if response.status_code == 429 or response.status_code >= 500:
+                if attempt < 4:
+                    time.sleep(min(2**attempt, 20))
+                    continue
+                raise AvitoApiError(
+                    oauth_http_error_message(response.status_code),
+                    status_code=response.status_code,
+                    body=None,
+                )
             break
         # OAuth responses contain credentials and must never enter export callbacks.
         if response.status_code >= 300:
@@ -387,3 +391,47 @@ def retry_delay(headers, attempt):
             )
         except (TypeError, ValueError, OverflowError):
             return min(2**attempt, 30)
+
+
+def oauth_transport_error_message(exc: httpx.TransportError) -> str:
+    if isinstance(exc, httpx.ConnectTimeout):
+        return "OAuth connect timeout"
+    if isinstance(exc, httpx.ReadTimeout):
+        return "OAuth read timeout"
+    if isinstance(exc, httpx.ProxyError):
+        return "OAuth proxy error"
+    if isinstance(exc, httpx.ConnectError):
+        cause = " ".join(
+            str(part)
+            for part in (
+                exc,
+                repr(exc),
+                *(exc.args or ()),
+                exc.__cause__ or "",
+            )
+        ).lower()
+        if any(
+            marker in cause
+            for marker in (
+                "name or service not known",
+                "nodename nor servname",
+                "temporary failure in name resolution",
+                "getaddrinfo failed",
+                "no address associated with hostname",
+            )
+        ):
+            return "OAuth DNS error"
+        if "certificate" in cause or "tls" in cause or "ssl" in cause:
+            return "OAuth TLS error"
+        return "OAuth connect error"
+    if isinstance(exc, httpx.RemoteProtocolError):
+        return "OAuth connection reset"
+    return "OAuth transport error"
+
+
+def oauth_http_error_message(status_code: int) -> str:
+    if status_code == 429:
+        return "OAuth HTTP 429"
+    if status_code >= 500:
+        return "OAuth HTTP 5xx"
+    return f"OAuth HTTP {status_code}"
