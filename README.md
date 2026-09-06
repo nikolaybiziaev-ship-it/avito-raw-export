@@ -72,7 +72,8 @@ Avito не возвращает показатель, недоступный к�
 максимальный размер контрактом не указан. Для `items` доступны фильтры категорий
 и сотрудников, но не список `item_id`.
 
-Источник: [официальный каталог Avito API](https://developers.avito.ru/api-catalog/statistics/documentation).
+Источник: [официальный каталог Avito API](https://developers.avito.ru/api-catalog/accounts-hierarchy/documentation)
+и [машиночитаемая копия Statistics OpenAPI](https://raw.githubusercontent.com/api-evangelist/avito/refs/heads/main/openapi/avito-statistics-api-openapi.yml).
 
 ## Backfill, rate limit и recovery
 
