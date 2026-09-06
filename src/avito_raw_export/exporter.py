@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
-import re
+import threading
+from dataclasses import asdict
+from datetime import datetime, UTC
+from filelock import FileLock
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +14,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .client import AvitoApiError, AvitoClient, RawResponse, is_avito_media_url
-from .store import ExportStore
+from .store import ExportStore, atomic_json, atomic_bytes, replace_file
+from .identifiers import valid_chat_id, chat_segment, file_id
+from .recovery import Journal, ReplayClient, digest_file
 
 ITEM_STATUSES = ("active", "removed", "old", "blocked", "rejected")
 CHAT_TYPES = (None, "u2i", "u2u", "a2u")
@@ -29,6 +34,7 @@ class ExportOptions:
     chat_details: bool = True
     messages: bool = True
     ratings_and_reviews: bool = True
+    resume_from: Path | None = None
 
 
 @dataclass(slots=True)
@@ -42,6 +48,8 @@ class ExportStats:
     message_pages: int = 0
     media_files: int = 0
     errors: int = 0
+    warnings: int = 0
+    failed_media: int = 0
     oldest_message: int | None = None
     newest_message: int | None = None
     stage: str = ""
@@ -64,7 +72,20 @@ class Exporter:
         self.on_progress = on_progress or (lambda _: None)
         self.on_log = on_log or (lambda _: None)
         self.stats = ExportStats()
-        self.store = ExportStore(options.export_root)
+        self.resuming = options.resume_from is not None
+        self.store = (
+            ExportStore.open_existing(options.resume_from)
+            if self.resuming
+            else ExportStore(options.export_root)
+        )
+        if self.resuming:
+            for key, value in self.store.manifest.get("options", {}).items():
+                if key not in ("export_root", "resume_from") and hasattr(options, key):
+                    setattr(options, key, value)
+        self.journal = None
+        self.stop_event = threading.Event()
+        self._active_stage = None
+        self._stage_errors = 0
         self.client = AvitoClient(
             client_id, client_secret, on_request=self.store.record_request
         )
@@ -81,7 +102,105 @@ class Exporter:
     def close(self) -> None:
         self.client.close()
 
+    def request_stop(self) -> None:
+        self.stop_event.set()
+
     def run(self) -> Path:
+        # FileLock releases OS ownership even after an unclean process exit.
+        with FileLock(str(self.store.root / ".resume.lock"), timeout=0):
+            if self.resuming:
+                callback = getattr(self.client, "on_request", None)
+                self.client.on_request = None
+                try:
+                    self.client.authenticate()
+                    account = self.client.get("/core/v1/accounts/self").json()
+                    if self.store.manifest.get(
+                        "account_id"
+                    ) is not None and self._extract_account_id(
+                        account
+                    ) != self.store.manifest.get("account_id"):
+                        raise ValueError(
+                            "Выбран другой аккаунт: продолжение этого архива запрещено"
+                        )
+                except BaseException:
+                    self.client.close()
+                    raise
+                finally:
+                    self.client.on_request = callback
+                backup = self.store.root / "manifest.before-v02.json"
+                if not backup.exists():
+                    atomic_bytes(
+                        backup, (self.store.root / "manifest.json").read_bytes()
+                    )
+                self.store.manifest["recovered_from"] = self.store.manifest.get(
+                    "status"
+                )
+                self.store.manifest["recovered_at"] = datetime.now(UTC).isoformat()
+                self._log(
+                    "Восстановление после остановки: проверяю локальные RAW и файлы"
+                )
+            self.store.manifest.update(format="avito-raw-export-v2", status="running")
+            self.store.manifest.setdefault("stages", {})
+            self.store.manifest.setdefault(
+                "legacy_counts", dict(self.store.manifest["counts"])
+            )
+            self.store.manifest["options"] = {
+                k: v
+                for k, v in asdict(self.options).items()
+                if k not in ("export_root", "resume_from")
+            }
+            try:
+                self.journal = Journal(self.store)
+                self.journal.import_files(on_progress=self._log)
+                if self.resuming:
+                    for filename, target in (
+                        ("discovered_item_ids.json", self.item_ids),
+                        ("discovered_chat_ids.json", self.chat_ids),
+                        ("voice_ids.json", self.voice_ids),
+                        ("media_urls.json", self.media_urls),
+                        ("review_ids.json", self.review_ids),
+                    ):
+                        path = self.store.index / filename
+                        if path.exists():
+                            values = json.loads(path.read_bytes())
+                            if not isinstance(values, list):
+                                raise ValueError("Invalid recovery index")
+                            if target is self.chat_ids:
+                                values = [
+                                    value for value in values if valid_chat_id(value)
+                                ]
+                            target.update(values)
+                network = self.client
+
+                def record(raw):
+                    self.store.record_request(raw)
+                    self.journal.index_response(
+                        raw,
+                        self.store.raw
+                        / "requests"
+                        / f"{self.store._request_seq:07d}.json",
+                    )
+
+                network.on_request = record
+                self.client = ReplayClient(network, self.journal)
+                result = self._run()
+                self.journal.export_summary()
+                return result
+            except BaseException as exc:
+                self.store.manifest["status"] = (
+                    "interrupted"
+                    if isinstance(exc, (KeyboardInterrupt, SystemExit))
+                    else "failed"
+                )
+                self.store.write_manifest()
+                raise
+            finally:
+                if self.journal:
+                    self.journal.close()
+                self.journal = None
+                self.client.close()
+
+    def _run(self) -> Path:
         try:
             self._stage("connection", "Проверяю подключение")
             self.client.authenticate()
@@ -92,7 +211,8 @@ class Exporter:
                     "Не удалось определить user_id из /core/v1/accounts/self"
                 )
             self.stats.account_id = account_id
-            self.store.rename_for_account(account_id)
+            self.store.manifest["account_id"] = account_id
+            self.store.write_manifest()
             self.store.save_json("account.json", account)
             self._log(f"✓ Подключен аккаунт Avito {account_id}")
 
@@ -114,6 +234,9 @@ class Exporter:
                 self._export_item_details()
             self.store.save_json("discovered_item_ids.json", sorted(self.item_ids))
             self.store.save_json("discovered_chat_ids.json", sorted(self.chat_ids))
+            self.store.save_json(
+                "chat_file_map.json", {i: file_id(i) for i in sorted(self.chat_ids)}
+            )
 
             while True:
                 before = (len(self.item_ids), len(self.chat_ids))
@@ -127,6 +250,9 @@ class Exporter:
                     break
             self.store.save_json("discovered_item_ids.json", sorted(self.item_ids))
             self.store.save_json("discovered_chat_ids.json", sorted(self.chat_ids))
+            self.store.save_json(
+                "chat_file_map.json", {i: file_id(i) for i in sorted(self.chat_ids)}
+            )
             if self.options.messages:
                 self._export_messages()
             if self.options.download_voice:
@@ -135,15 +261,28 @@ class Exporter:
                 self._download_media_urls()
 
             self.store.save_json("media_urls.json", sorted(self.media_urls))
+            self.journal.resolve("fatal", None)
+            self._sync_manifest()
             self.store.manifest["status"] = (
-                "partial" if self.stats.errors else "completed"
+                "partial" if self.stats.errors or self.stats.warnings else "completed"
             )
             self._sync_manifest()
             self._stage("done", "Выгрузка завершена")
             self._log("✓ Выгрузка завершена")
             return self.store.root
-        except Exception as exc:
-            self.store.manifest["status"] = "failed"
+        except BaseException as exc:
+            self.store.manifest["status"] = (
+                "interrupted"
+                if isinstance(exc, (KeyboardInterrupt, SystemExit))
+                else "failed"
+            )
+            if self._active_stage:
+                self.store.manifest["stages"][self._active_stage] = {
+                    "status": self.store.manifest["status"]
+                }
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                self.store.write_manifest()
+                raise
             self._error("fatal", exc)
             raise
         finally:
@@ -259,8 +398,10 @@ class Exporter:
                 )
                 self.store.save_raw(f"items/details/{item_id}.json", raw)
                 self._detailed_item_ids.add(item_id)
+                self.journal.resolve("item-detail", {"item_id": item_id})
                 self._collect_media_urls(self._json_any(raw))
             except Exception as exc:
+                self._detailed_item_ids.add(item_id)
                 self._error("item-detail", exc, {"item_id": item_id})
             self.stats.detail = f"Карточка объявления {idx}/{total}"
             self._notify()
@@ -335,10 +476,12 @@ class Exporter:
                     continue
                 chat_id = chat.get("id")
                 if chat_id:
-                    if re.fullmatch(r"[A-Za-z0-9_-]+", str(chat_id)):
+                    if valid_chat_id(str(chat_id)):
                         self.chat_ids.add(str(chat_id))
                     else:
-                        self._error("chat-id", ValueError("Unsafe chat identifier"))
+                        self._error(
+                            "identifier-skipped", ValueError("Unsafe chat identifier")
+                        )
                 item_id = self._extract_item_id_from_chat(chat)
                 if item_id is not None:
                     self.item_ids.add(item_id)
@@ -458,9 +601,10 @@ class Exporter:
             self._detailed_chat_ids.add(chat_id)
             try:
                 raw = self.client.get(
-                    f"/messenger/v2/accounts/{self.stats.account_id}/chats/{chat_id}"
+                    f"/messenger/v2/accounts/{self.stats.account_id}/chats/{chat_segment(chat_id)}"
                 )
-                self.store.save_raw(f"chats/details/{chat_id}.json", raw)
+                self.store.save_raw(f"chats/details/{file_id(chat_id)}.json", raw)
+                self.journal.resolve("chat-detail", {"chat_id": chat_id})
                 payload = self._json_object(raw)
                 item_id = self._extract_item_id_from_chat(payload)
                 if item_id is not None:
@@ -481,13 +625,16 @@ class Exporter:
             while offset <= 1000:
                 try:
                     raw = self.client.get(
-                        f"/messenger/v3/accounts/{self.stats.account_id}/chats/{chat_id}/messages/",
+                        f"/messenger/v3/accounts/{self.stats.account_id}/chats/{chat_segment(chat_id)}/messages/",
                         params={"limit": 100, "offset": offset},
                     )
                 except Exception as exc:
                     self._error("messages", exc, {"chat_id": chat_id, "offset": offset})
                     break
-                self.store.save_raw(f"messages/{chat_id}/offset_{offset:04d}.json", raw)
+                self.store.save_raw(
+                    f"messages/{file_id(chat_id)}/offset_{offset:04d}.json", raw
+                )
+                self.journal.resolve("messages", {"chat_id": chat_id, "offset": offset})
                 payload = self._json_any(raw)
                 messages = (
                     payload
@@ -539,86 +686,114 @@ class Exporter:
                 self.voice_ids.add(str(voice["voice_id"]))
         self._collect_media_urls(message)
 
+    def _save_download(self, url, category, key):
+        if self.journal.media_exists(key):
+            return
+        previous = self.journal.media_record(key)
+        if previous and previous[0] in ("unavailable", "skipped"):
+            return
+        if not is_avito_media_url(url):
+            self.journal.media_status(key, "skipped", "untrusted_url")
+            self._error(
+                "media-skipped", ValueError("Untrusted media URL"), {"key": key}
+            )
+            return
+        folder = self.store.media / category
+        folder.mkdir(parents=True, exist_ok=True)
+        stem = hashlib.sha256(key.encode()).hexdigest()
+        partial = folder / (stem + ".part")
+        try:
+            self._check_stop()
+            raw = self.client.download_to(url, partial)
+            self._check_stop()
+            digest = digest_file(partial)
+            size = partial.stat().st_size
+            extension = self._extension(raw, url)
+            path = folder / (stem + extension)
+            replace_file(partial, path)
+            atomic_json(
+                path.with_suffix(path.suffix + ".meta.json"),
+                {
+                    "url": url,
+                    "key": key,
+                    "status_code": raw.status_code,
+                    "headers": self.store._redacted_headers(raw.headers),
+                    "bytes": size,
+                    "sha256": digest,
+                },
+            )
+            self.journal.media_done(key, path, digest, size)
+            self.journal.resolve("media-download", {"key": key})
+        except Exception as exc:
+            status = (
+                "unavailable"
+                if getattr(exc, "status_code", None) in (403, 404, 410)
+                else "failed"
+            )
+            self.journal.media_status(key, status, type(exc).__name__)
+            self._error("media-download", exc, {"key": key})
+        finally:
+            if partial.exists():
+                partial.unlink()
+        self._notify()
+
     def _download_voice_files(self) -> None:
         if self.stats.account_id is None or not self.voice_ids:
             return
-        self._stage("voice", "Получаю ссылки и скачиваю голосовые сообщения")
-        ids = sorted(self.voice_ids)
-        # Small batches keep query strings reasonable. API accepts voice_ids list.
-        for batch_no in range(0, len(ids), 20):
-            batch = ids[batch_no : batch_no + 20]
-            params = [("voice_ids", voice_id) for voice_id in batch]
+        self._stage("voice", "Продолжаю голосовые: сохранённые файлы пропускаются")
+        for voice_id in sorted(self.voice_ids):
+            self._check_stop()
+            key = "voice:" + voice_id
+            record = self.journal.media_record(key)
+            if self.journal.media_exists(key) or (
+                record and record[0] in ("unavailable", "skipped")
+            ):
+                continue
             try:
+                # Live v1 responses only acknowledged the first repeated query parameter.
                 raw = self.client.get(
                     f"/messenger/v1/accounts/{self.stats.account_id}/getVoiceFiles",
-                    params=params,
+                    params={"voice_ids": voice_id},
                 )
-                self.store.save_raw(f"voice/links/batch_{batch_no // 20:05d}.json", raw)
+                self.store.save_raw(f"voice/links/{file_id(voice_id)}.json", raw)
                 payload = self._json_object(raw)
                 urls = payload.get("voices_urls") or payload.get("voicesUrls") or {}
                 if not isinstance(urls, dict):
                     raise ValueError("Expected voice URL mapping")
-                missing = set(batch) - {str(key) for key in urls}
-                if missing:
+                url = self._url_from_voice_value(urls.get(voice_id))
+                self.store.save_json(
+                    f"voice/{file_id(voice_id)}.json",
+                    {
+                        "requested": [voice_id],
+                        "returned": list(urls),
+                        "missing": [] if url else [voice_id],
+                    },
+                )
+                if not url:
+                    self.journal.media_status(key, "unavailable", "voice_missing")
                     self._error(
-                        "voice-links",
-                        ValueError("API omitted requested voice files"),
-                        {"voice_ids": sorted(missing)},
+                        "voice-missing",
+                        ValueError("Requested voice is unavailable"),
+                        {"voice_id": voice_id},
                     )
-                if isinstance(urls, dict):
-                    for voice_id, value in urls.items():
-                        url = self._url_from_voice_value(value)
-                        if not url:
-                            self._error(
-                                "voice-links",
-                                ValueError("Missing voice URL"),
-                                {"voice_id": voice_id},
-                            )
-                            continue
-                        try:
-                            file_raw = self.client.download(url)
-                            ext = self._extension(file_raw, url, default=".bin")
-                            self.store.save_media(
-                                "voice",
-                                f"{voice_id}{ext}",
-                                file_raw.content,
-                                raw=file_raw,
-                            )
-                        except Exception as exc:
-                            self._error(
-                                "voice-download",
-                                exc,
-                                {"voice_id": voice_id, "url": url},
-                            )
+                    continue
+                self.journal.resolve("voice-links", {"voice_id": voice_id})
+                self._save_download(url, "voice", key)
             except Exception as exc:
-                self._error("voice-links", exc, {"voice_ids": batch})
-            self.stats.media_files = self.store.manifest["counts"]["media_files"]
+                self._error("voice-links", exc, {"voice_id": voice_id})
             self._notify()
 
     def _download_media_urls(self) -> None:
+        self._stage(
+            "media", "Продолжаю медиа: проверенные файлы не скачиваются повторно"
+        )
         urls = sorted(self.media_urls)
-        if not urls:
-            return
-        self._stage("media", "Скачиваю доступные медиафайлы Avito")
-        seen_hashes: set[str] = set()
         for idx, url in enumerate(urls, 1):
-            try:
-                raw = self.client.download(url)
-                digest = __import__("hashlib").sha256(raw.content).hexdigest()
-                if digest in seen_hashes:
-                    continue
-                seen_hashes.add(digest)
-                parsed = urlparse(url)
-                base = Path(parsed.path).name or f"media_{idx}"
-                if "." not in base:
-                    base += self._extension(raw, url, default=".bin")
-                self.store.save_media(
-                    "avito", f"{idx:06d}_{base}", raw.content, raw=raw
-                )
-            except Exception as exc:
-                self._error("media-download", exc, {"url": url})
-            self.stats.media_files = self.store.manifest["counts"]["media_files"]
-            self.stats.detail = f"Медиа {idx}/{len(urls)}"
+            self._check_stop()
+            self._save_download(url, "avito", url)
+            self.stats.detail = (
+                f"Медиа {idx}/{len(urls)}; сохранено {self.stats.media_files}"
+            )
             self._notify()
 
     def _collect_media_urls(self, value: Any, *, key: str = "") -> None:
@@ -740,12 +915,31 @@ class Exporter:
         except (TypeError, ValueError):
             return None
 
+    def _check_stop(self):
+        if self.stop_event.is_set():
+            raise KeyboardInterrupt("Export interrupted at checkpoint")
+
     def _stage(self, stage: str, detail: str) -> None:
+        self._check_stop()
+        if self._active_stage and self._active_stage != stage:
+            self.store.manifest["stages"][self._active_stage] = {
+                "status": "partial"
+                if self.stats.errors > self._stage_errors
+                else "completed",
+                "updated_at": datetime.now(UTC).isoformat(),
+            }
+        self._active_stage = stage
+        self._stage_errors = self.stats.errors
+        self.store.manifest["stages"][stage] = {
+            "status": "completed" if stage == "done" else "running"
+        }
+        self.store.manifest["current_stage"] = stage
         self.stats.stage = stage
         self.stats.detail = detail
         self._notify()
 
     def _notify(self) -> None:
+        self._check_stop()
         self._sync_manifest()
         self.on_progress(self.stats)
 
@@ -753,13 +947,31 @@ class Exporter:
         self.on_log(line)
 
     def _error(self, where: str, exc: Exception, context: Any = None) -> None:
-        self.store.error(where, exc, context)
-        self.stats.errors = self.store.manifest["counts"]["errors"]
-        self.on_log(f"⚠ {where}: {exc}")
+        category, reason, is_error = self.journal.issue(where, exc, context)
+        entry = {
+            "at": datetime.now(UTC).isoformat(),
+            "where": where,
+            "category": category,
+            "reason": reason,
+            "http_status": getattr(exc, "status_code", None),
+            "error": str(exc),
+            "context": context,
+        }
+        with (self.store.logs / "issues.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        self.on_log(f"{'Ошибка' if is_error else 'Ограничение'}: {where}: {reason}")
         self._notify()
 
     def _sync_manifest(self) -> None:
         counts = self.store.manifest["counts"]
+        if self.journal:
+            counts.update(self.journal.counts())
+            self.stats.errors = counts["errors"]
+            self.stats.warnings = counts["warnings"]
+            self.stats.failed_media = counts["failed_media"]
+            self.stats.media_files = counts["media_files"]
+        self.stats.items = len(self.item_ids)
+        self.stats.chats = len(self.chat_ids)
         counts.update(
             {
                 "items": len(self.item_ids),

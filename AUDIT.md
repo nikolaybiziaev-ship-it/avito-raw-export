@@ -69,3 +69,30 @@ Archives contain private, unencrypted data and may include temporary signed medi
 URLs. Never publish them. Git ignores and scanners can be intentionally bypassed
 and cannot identify every possible personal value embedded in source; see
 [SECURITY.md](SECURITY.md) for the publication policy.
+
+
+# v0.2 recovery audit
+
+The v0.2 investigation used a private, local v0.1 archive. No real IDs, messages,
+reviews, media, credentials or private report are included in this repository.
+Original v0.1 audit statements above describe that earlier validation only.
+
+Changes: independent chat ID validation/URL encoding/file mapping including tilde;
+foreign-item 422 classification and persistent suppression; Avito rate-limit header;
+singleton voice lookup; validated request replay; private SQLite checkpoints;
+atomic manifest/index replacement with bounded Windows sharing-lock recovery;
+streamed media and per-file resume; archive locking and account identity check;
+separate error/limitation counters and UI resume/stop controls.
+
+Validation includes the previous suite plus interrupted-message/media resume,
+legacy running-archive import, no repeated saved downloads, anonymous live ID shapes,
+malicious identifiers, API 404/422/429, partial voice responses, streaming, atomic
+replacement failure, wrong-account rejection and archive locking. A browser test
+completed interrupted → resume → completed using a synthetic API. Private RAW and
+media were hash-checked on a separate local copy. Real-network completion of that
+archive is left to the user's resume action; no new live responses are claimed.
+
+Known limits: replay rebuilds local indexes before reaching missing network work;
+offset pages are not a consistent live snapshot; public API ceilings remain explicit
+limitations. An abruptly killed process may leave `running`, which is resumable.
+The streaming implementation supersedes the v0.1 memory-buffering limitation above.

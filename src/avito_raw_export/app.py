@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import queue
 import subprocess
@@ -9,10 +10,12 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from nicegui import ui
+from nicegui import ui, app as nice_app
 from platformdirs import user_documents_dir
 
 from .client import AvitoClient
+from .recovery import unfinished_exports
+from .store import atomic_json
 from .config import Profile, ProfileStore
 from .exporter import Exporter, ExportOptions, ExportStats
 
@@ -22,11 +25,19 @@ class AppState:
         self.profile_store = ProfileStore()
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.running = False
+        self.active_exporter = None
         self.last_export: Path | None = None
         self.task: asyncio.Task | None = None
 
 
 def default_export_root() -> Path:
+    preferences = ProfileStore().root / "ui.json"
+    try:
+        saved = json.loads(preferences.read_bytes()).get("export_root")
+        if saved:
+            return Path(saved)
+    except (OSError, ValueError):
+        pass
     return Path(user_documents_dir()) / "AvitoRawExport" / "exports"
 
 
@@ -152,6 +163,27 @@ def build_page() -> None:
             export_root = ui.input(
                 "Папка для выгрузок", value=str(default_export_root())
             ).classes("w-full")
+            resume_select = ui.select(
+                options={}, label="Незавершённая выгрузка"
+            ).classes("w-full")
+            recovery_label = ui.label("").classes("text-sm")
+
+            def refresh_exports():
+                found = unfinished_exports(Path(export_root.value or ".").expanduser())
+                resume_select.options = {
+                    str(path): f"{path.name} — {manifest.get('status')}"
+                    for path, manifest in found
+                }
+                resume_select.value = str(found[0][0]) if found else None
+                resume_select.update()
+                recovery_label.text = (
+                    "Найдена незавершённая выгрузка. Можно продолжить её или начать новую."
+                    if found
+                    else "Незавершённых выгрузок в этой папке нет."
+                )
+
+            export_root.on_value_change(lambda _: refresh_exports())
+            refresh_exports()
             ui.label(
                 "По умолчанию забираем всю историю, которую реально отдаёт API. Период заранее не режем."
             ).classes("text-sm opacity-70")
@@ -186,6 +218,8 @@ def build_page() -> None:
                 review_counter = ui.label("Отзывы: 0")
                 media_counter = ui.label("Медиа: 0")
                 error_counter = ui.label("Ошибки: 0")
+                warning_counter = ui.label("Предупреждения: 0")
+                failed_media_counter = ui.label("Не скачано медиа: 0")
 
             log_box = ui.log(max_lines=500).classes("w-full h-64")
 
@@ -195,7 +229,7 @@ def build_page() -> None:
             def emit_log(line: str) -> None:
                 state.events.put(("log", line))
 
-            async def start_export() -> None:
+            async def start_export(resume=False) -> None:
                 if state.running:
                     ui.notify("Выгрузка уже идёт", type="warning")
                     return
@@ -210,8 +244,20 @@ def build_page() -> None:
                 except (OSError, ValueError) as exc:
                     ui.notify(f"Недоступна папка выгрузок: {exc}", type="negative")
                     return
+                selected = (
+                    Path(resume_select.value)
+                    if resume and resume_select.value
+                    else None
+                )
+                if resume and selected is None:
+                    ui.notify("Выберите незавершённую выгрузку", type="warning")
+                    return
+                atomic_json(
+                    state.profile_store.root / "ui.json", {"export_root": str(root)}
+                )
                 options = ExportOptions(
                     export_root=root,
+                    resume_from=selected,
                     download_voice=bool(download_voice.value),
                     download_avito_media=bool(download_media.value),
                     list_items=bool(opt_items.value),
@@ -224,6 +270,7 @@ def build_page() -> None:
                 )
                 state.running = True
                 start_button.disable()
+                resume_button.disable()
                 stage_label.text = "Запуск…"
                 progress.value = 0.02
                 log_box.clear()
@@ -237,20 +284,43 @@ def build_page() -> None:
                         on_progress=emit_progress,
                         on_log=emit_log,
                     )
+                    state.active_exporter = exporter
                     return exporter.run()
 
                 async def runner() -> None:
                     try:
                         result = await asyncio.to_thread(work)
                         state.events.put(("done", str(result)))
-                    except Exception as exc:
-                        state.events.put(("fatal", str(exc)))
+                    except BaseException as exc:
+                        state.events.put(
+                            (
+                                "interrupted"
+                                if isinstance(
+                                    exc, (KeyboardInterrupt, asyncio.CancelledError)
+                                )
+                                else "fatal",
+                                str(exc),
+                            )
+                        )
 
                 state.task = asyncio.create_task(runner())
 
             start_button = ui.button(
-                "Выгрузить максимум", on_click=start_export
+                "Начать новую", on_click=lambda: start_export(False)
             ).classes("text-lg")
+            resume_button = ui.button(
+                "Продолжить последнюю выгрузку", on_click=lambda: start_export(True)
+            ).classes("text-lg")
+
+            def stop_export():
+                if state.active_exporter:
+                    state.active_exporter.request_stop()
+                    recovery_label.text = (
+                        "Остановка после текущего запроса; checkpoint будет сохранён."
+                    )
+
+            ui.button("Остановить с сохранением", on_click=stop_export).props("outline")
+            nice_app.on_shutdown(stop_export)
             ui.button(
                 "Открыть последнюю папку",
                 on_click=lambda: open_folder(
@@ -294,31 +364,49 @@ def build_page() -> None:
                         review_counter.text = f"Отзывы: {data.get('reviews_seen', 0)}"
                         media_counter.text = f"Медиа: {data.get('media_files', 0)}"
                         error_counter.text = f"Ошибки: {data.get('errors', 0)}"
+                        warning_counter.text = (
+                            f"Предупреждения: {data.get('warnings', 0)}"
+                        )
+                        failed_media_counter.text = (
+                            f"Не скачано медиа: {data.get('failed_media', 0)}"
+                        )
                     elif kind == "done":
                         state.running = False
                         state.last_export = Path(payload)
                         start_button.enable()
-                        stage_label.text = "✓ Выгрузка завершена"
+                        resume_button.enable()
+                        refresh_exports()
+                        stage_label.text = "completed — выгрузка завершена"
                         detail_label.text = str(payload)
                         progress.value = 1.0
-                        import json
 
                         manifest = json.loads(
                             (state.last_export / "manifest.json").read_text(
                                 encoding="utf-8"
                             )
                         )
+                        recovery_label.text = (
+                            "Экспорт восстановлен после остановки."
+                            if manifest.get("recovered_at")
+                            else ""
+                        )
                         if manifest.get("status") == "partial":
                             stage_label.text = (
-                                "Выгрузка завершена с ошибками / ограничениями"
+                                "partial — завершено с ошибками / ограничениями"
                             )
                             ui.notify(stage_label.text, type="warning")
                         else:
                             ui.notify("Выгрузка завершена", type="positive")
-                    elif kind == "fatal":
+                    elif kind in ("fatal", "interrupted"):
                         state.running = False
                         start_button.enable()
-                        stage_label.text = "Выгрузка остановлена"
+                        resume_button.enable()
+                        refresh_exports()
+                        stage_label.text = (
+                            "interrupted — можно продолжить"
+                            if kind == "interrupted"
+                            else "failed — можно продолжить"
+                        )
                         detail_label.text = str(payload)
                         log_box.push(f"✗ {payload}")
                         ui.notify(str(payload), type="negative", timeout=15000)

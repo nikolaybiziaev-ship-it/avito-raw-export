@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
+import time
 import re
 import uuid
 from datetime import UTC, datetime
@@ -18,11 +21,43 @@ def _safe(value: str) -> str:
     return value[:120].strip(".") or "unknown"
 
 
+def replace_file(source, destination):
+    # Windows scanners/readers can hold a sharing lock briefly after close.
+    for attempt in range(8):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError:
+            if attempt == 7:
+                raise
+            time.sleep(min(0.02 * 2**attempt, 0.3))
+
+
+def atomic_bytes(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=".checkpoint-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        replace_file(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def atomic_json(path: Path, payload: Any) -> None:
+    atomic_bytes(
+        path,
+        json.dumps(payload, ensure_ascii=False, indent=2, default=str).encode("utf-8"),
+    )
+
+
 class ExportStore:
     def __init__(self, root: Path, account_id: int | str | None = None) -> None:
         stamp = datetime.now().astimezone().strftime("%Y-%m-%d_%H%M%S")
-        suffix = _safe(str(account_id)) if account_id else "pending"
-        self.root = root / f"{stamp}_{uuid.uuid4().hex[:12]}_account_{suffix}"
+        self.root = root / f"{stamp}_export_{uuid.uuid4().hex[:12]}"
         self.raw = self.root / "raw"
         self.media = self.root / "media"
         self.logs = self.root / "logs"
@@ -54,6 +89,29 @@ class ExportStore:
             ],
         }
         self.write_manifest()
+
+    @classmethod
+    def open_existing(cls, root: Path) -> "ExportStore":
+        self = cls.__new__(cls)
+        self.root = root.resolve()
+        self.manifest = json.loads((self.root / "manifest.json").read_bytes())
+        if self.manifest.get("format") not in (
+            "avito-raw-export-v1",
+            "avito-raw-export-v2",
+        ):
+            raise ValueError("Unsupported archive format")
+        self.raw, self.media, self.logs, self.index = [
+            self.root / name for name in ("raw", "media", "logs", "index")
+        ]
+        self._request_seq = max(
+            (
+                int(p.stem)
+                for p in (self.raw / "requests").glob("*.json")
+                if p.stem.isdigit()
+            ),
+            default=0,
+        )
+        return self
 
     def rename_for_account(self, account_id: int | str) -> None:
         self.manifest["account_id"] = account_id
@@ -106,34 +164,26 @@ class ExportStore:
     def save_raw(self, relative: str, raw: RawResponse) -> Path:
         path = self._contained(self.raw, relative)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(raw.content)
+        atomic_bytes(path, raw.content)
         meta_path = path.with_suffix(path.suffix + ".meta.json")
-        meta_path.write_text(
-            json.dumps(
-                {
-                    "method": raw.method,
-                    "url": raw.url,
-                    "params": raw.params,
-                    "status_code": raw.status_code,
-                    "headers": self._redacted_headers(raw.headers),
-                    "bytes": len(raw.content),
-                    "sha256": hashlib.sha256(raw.content).hexdigest(),
-                },
-                ensure_ascii=False,
-                indent=2,
-                default=str,
-            ),
-            encoding="utf-8",
+        atomic_json(
+            meta_path,
+            {
+                "method": raw.method,
+                "url": raw.url,
+                "params": raw.params,
+                "status_code": raw.status_code,
+                "headers": self._redacted_headers(raw.headers),
+                "bytes": len(raw.content),
+                "sha256": hashlib.sha256(raw.content).hexdigest(),
+            },
         )
         return path
 
     def save_json(self, relative: str, payload: Any) -> Path:
         path = self._contained(self.index, relative)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, default=str),
-            encoding="utf-8",
-        )
+        atomic_json(path, payload)
         return path
 
     def save_media(
@@ -190,11 +240,4 @@ class ExportStore:
         self.write_manifest()
 
     def write_manifest(self) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
-        temporary = self.root / "manifest.json.tmp"
-        temporary.write_text(
-            json.dumps(self.manifest, ensure_ascii=False, indent=2, default=str),
-            encoding="utf-8",
-        )
-
-        temporary.replace(self.root / "manifest.json")
+        atomic_json(self.root / "manifest.json", self.manifest)

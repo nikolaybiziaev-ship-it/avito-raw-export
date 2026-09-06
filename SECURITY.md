@@ -23,3 +23,9 @@ are preserved without JSON rewriting; response cookies are redacted in metadata.
 The API client accepts only explicitly approved read endpoints. OAuth token POST
 is the sole POST. Media use HTTPS Avito domain boundaries and checked redirects;
 external URLs remain in RAW JSON and are not downloaded.
+
+
+Recovery databases, checkpoint backups, per-voice indexes and private audit reports
+are sensitive archive data and must remain outside Git. Resume checks account identity
+before migration and takes an OS file lock. Opaque chat IDs are mapped to portable
+filenames separately from URL validation; special IDs never become path components.
