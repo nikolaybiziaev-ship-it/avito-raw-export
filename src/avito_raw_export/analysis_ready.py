@@ -62,6 +62,7 @@ def build_analysis_ready(archive_root: Path) -> AnalysisReadyResult:
         index_rows.append(
             {
                 "conversation_id": safe_id,
+                "conversation_type": conversation.get("conversation_type"),
                 "chat_id": chat_id,
                 "item_id": conversation.get("item_id"),
                 "item_title": conversation.get("item_title"),
@@ -77,7 +78,10 @@ def build_analysis_ready(archive_root: Path) -> AnalysisReadyResult:
 
     atomic_json(output / "items.json", list(items.values()))
     atomic_json(output / "corpus_manifest.json", _corpus_manifest(conversations, items))
-    _write_jsonl(output / "conversations.jsonl", conversations)
+    _write_jsonl(
+        output / "conversations.jsonl",
+        [_compact_conversation(conversation) for conversation in conversations],
+    )
     _write_csv(output / "conversations_index.csv", index_rows)
     atomic_json(output / "chats_index.json", _legacy_index(index_rows))
     _write_csv(output / "chats_index.csv", _legacy_index(index_rows), legacy=True)
@@ -138,10 +142,12 @@ def _conversation(
     item_id = _extract_item_id(chat_detail)
     item = items.get(str(item_id)) if item_id is not None else None
     item_context = item or _context_item(chat_detail.get("context"))
+    conversation_type = _conversation_type(chat_detail, item_id)
     first = messages[0]["datetime"] if messages else None
     last = messages[-1]["datetime"] if messages else None
     result: dict[str, Any] = {
         "conversation_id": safe_id,
+        "conversation_type": conversation_type,
         "chat_id": chat_id,
         "item_context": item_context,
         "context": chat_detail.get("context") if chat_detail else None,
@@ -166,14 +172,17 @@ def _conversation(
 
 def _analysis_message(message: dict[str, Any]) -> dict[str, Any]:
     timestamp = _timestamp(message)
+    direction = _direction(message)
+    message_type = _message_type(message)
+    author_id = _author_id(message)
     result: dict[str, Any] = {
         "message_id": _message_id(message),
         "timestamp": timestamp,
         "datetime": _datetime(timestamp),
-        "direction": _direction(message),
-        "role": _role(_direction(message)),
-        "author_id": _author_id(message),
-        "type": _message_type(message),
+        "direction": direction,
+        "role": _role(direction, message_type, author_id, message),
+        "author_id": author_id,
+        "type": message_type,
         "text": _message_text(message),
         "content": message.get("content"),
     }
@@ -289,12 +298,32 @@ def _speaker(direction: Any) -> str:
     return "Неизвестный участник"
 
 
-def _role(direction: str) -> str:
+def _role(
+    direction: str, message_type: str, author_id: str | None, message: dict[str, Any]
+) -> str:
+    if _is_system_message(message, message_type, author_id):
+        return "avito_system"
     if direction == "incoming":
         return "client"
     if direction == "outgoing":
         return "seller"
     return "unknown"
+
+
+def _is_system_message(
+    message: dict[str, Any], message_type: str, author_id: str | None
+) -> bool:
+    if author_id == "0":
+        return True
+    normalized_type = message_type.lower()
+    if normalized_type in {"system", "a2u", "avito_system", "notification"}:
+        return True
+    author = message.get("author") or message.get("user") or message.get("sender")
+    if isinstance(author, dict):
+        name = str(_first_present(author, ("name", "type", "role")) or "").lower()
+        if "avito" in name or "system" in name:
+            return True
+    return False
 
 
 def _placeholder(kind: Any) -> str:
@@ -331,6 +360,7 @@ def _write_csv(path: Path, rows: list[dict[str, Any]], *, legacy: bool = False) 
         if legacy
         else [
             "conversation_id",
+            "conversation_type",
             "chat_id",
             "item_id",
             "item_title",
@@ -353,8 +383,94 @@ def _write_csv(path: Path, rows: list[dict[str, Any]], *, legacy: bool = False) 
 
 def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    body = "".join(json.dumps(row, ensure_ascii=False, default=str) + "\n" for row in rows)
+    body = "".join(
+        json.dumps(row, ensure_ascii=False, default=str) + "\n" for row in rows
+    )
     atomic_bytes(path, body.encode("utf-8"))
+
+
+def _compact_conversation(conversation: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "conversation_id": conversation.get("conversation_id"),
+        "conversation_type": conversation.get("conversation_type"),
+        "chat_id": conversation.get("chat_id"),
+        "item": _compact_item(conversation.get("item_context"), conversation),
+        "first_message_at": conversation.get("first_message_at"),
+        "last_message_at": conversation.get("last_message_at"),
+        "message_count": conversation.get("message_count", 0),
+        "messages": [
+            _compact_message(message)
+            for message in conversation.get("messages", [])
+            if isinstance(message, dict)
+        ],
+    }
+
+
+def _compact_item(item: Any, conversation: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(item, dict) and conversation.get("item_id") is None:
+        return None
+    item = item if isinstance(item, dict) else {}
+    result = {
+        "id": _first_non_none(
+            conversation.get("item_id"), _first_present(item, ("id", "item_id", "itemId"))
+        ),
+        "title": _first_non_none(conversation.get("item_title"), _item_title(item)),
+        "category": _first_non_none(conversation.get("category"), _item_category(item)),
+        "price": _first_non_none(conversation.get("price"), _item_price(item)),
+        "status": _first_non_none(conversation.get("status"), _item_status(item)),
+        "location": _item_location(item),
+        "url": _first_non_none(conversation.get("url"), _item_url(item)),
+    }
+    return {key: value for key, value in result.items() if value is not None}
+
+
+def _compact_message(message: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "message_id": message.get("message_id"),
+        "datetime": message.get("datetime"),
+        "timestamp": message.get("timestamp"),
+        "role": message.get("role"),
+        "type": message.get("type"),
+        "text": message.get("text", ""),
+    }
+    if _has_media(message):
+        result["has_media"] = True
+    metadata = _compact_content_metadata(message.get("content"))
+    if metadata:
+        result["metadata"] = metadata
+    return {key: value for key, value in result.items() if value is not None}
+
+
+def _has_media(message: dict[str, Any]) -> bool:
+    kind = str(message.get("type") or "").lower()
+    if any(token in kind for token in ("image", "photo", "voice", "video", "file")):
+        return True
+    content = message.get("content")
+    return isinstance(content, dict) and any(
+        key in content for key in ("image", "images", "photo", "photos", "voice", "video", "file")
+    )
+
+
+def _compact_content_metadata(content: Any) -> dict[str, Any]:
+    if not isinstance(content, dict):
+        return {}
+    metadata: dict[str, Any] = {}
+    for key in ("link", "item", "location", "call"):
+        value = content.get(key)
+        if isinstance(value, dict):
+            metadata[key] = {
+                child_key: child_value
+                for child_key, child_value in value.items()
+                if child_key in {"title", "text", "type", "status"}
+                and not _looks_like_technical_url(child_value)
+            }
+        elif isinstance(value, (str, int, float, bool)) and not _looks_like_technical_url(value):
+            metadata[key] = value
+    return {key: value for key, value in metadata.items() if value}
+
+
+def _looks_like_technical_url(value: Any) -> bool:
+    return isinstance(value, str) and value.startswith(("http://", "https://"))
 
 
 def _load_json_object(path: Path) -> dict[str, Any]:
@@ -437,12 +553,72 @@ def _item_price(item: dict[str, Any] | None) -> Any:
     return _first_present(item, ("price", "price_value", "priceValue"))
 
 
+def _item_location(item: dict[str, Any] | None) -> Any:
+    if not isinstance(item, dict):
+        return None
+    return _first_present(item, ("location", "address", "city", "region"))
+
+
+def _conversation_type(chat: dict[str, Any], item_id: str | int | None) -> str:
+    chat_type = str(_first_present(chat, ("type", "chat_type", "chatType")) or "").lower()
+    context = chat.get("context")
+    context_type = ""
+    if isinstance(context, dict):
+        context_type = str(_first_present(context, ("type", "kind")) or "").lower()
+    users = chat.get("users")
+    if chat_type == "a2u" or context_type == "a2u":
+        return "avito_system"
+    if chat_type == "support" or context_type == "support":
+        return "avito_support"
+    if isinstance(users, list) and any(_is_support_user(user) for user in users):
+        return "avito_support"
+    if isinstance(users, list) and any(_is_system_user(user) for user in users):
+        return "avito_system"
+    if chat_type == "u2i" or item_id is not None:
+        return "customer_item"
+    return "other"
+
+
+def _is_support_user(user: Any) -> bool:
+    if not isinstance(user, dict):
+        return False
+    value = str(_first_present(user, ("type", "role", "name")) or "").lower()
+    return "support" in value or "поддерж" in value
+
+
+def _is_system_user(user: Any) -> bool:
+    if not isinstance(user, dict):
+        return False
+    user_id = _first_present(user, ("id", "user_id", "userId"))
+    if str(user_id) == "0":
+        return True
+    value = str(_first_present(user, ("type", "role", "name")) or "").lower()
+    return "avito" in value or "system" in value
+
+
 def _corpus_manifest(
     conversations: list[dict[str, Any]], items: dict[str, dict[str, Any]]
 ) -> dict[str, Any]:
-    first_values = [row.get("first_message_at") for row in conversations if row.get("first_message_at")]
-    last_values = [row.get("last_message_at") for row in conversations if row.get("last_message_at")]
+    first_values = [
+        row.get("first_message_at")
+        for row in conversations
+        if row.get("first_message_at")
+    ]
+    last_values = [
+        row.get("last_message_at")
+        for row in conversations
+        if row.get("last_message_at")
+    ]
     missing_item_context = sum(1 for row in conversations if not row.get("item_context"))
+    conversation_types = {
+        "customer_item": 0,
+        "avito_system": 0,
+        "avito_support": 0,
+        "other": 0,
+    }
+    for row in conversations:
+        kind = row.get("conversation_type")
+        conversation_types[str(kind) if kind in conversation_types else "other"] += 1
     missing_timestamps = sum(
         1
         for row in conversations
@@ -453,7 +629,10 @@ def _corpus_manifest(
         "format": "avito-raw-export-analysis-ready-v1",
         "created_at": datetime.now(UTC).isoformat(),
         "conversation_count": len(conversations),
-        "message_count": sum(int(row.get("message_count") or 0) for row in conversations),
+        "message_count": sum(
+            int(row.get("message_count") or 0) for row in conversations
+        ),
+        "conversation_types": conversation_types,
         "item_count": len(items),
         "first_message_at": min(first_values) if first_values else None,
         "last_message_at": max(last_values) if last_values else None,
@@ -520,6 +699,13 @@ def _first_present(mapping: dict[str, Any], keys: tuple[str, ...]) -> Any:
     for key in keys:
         if key in mapping and mapping[key] is not None:
             return mapping[key]
+    return None
+
+
+def _first_non_none(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
     return None
 
 
