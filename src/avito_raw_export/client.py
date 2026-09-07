@@ -57,7 +57,7 @@ class AvitoClient:
             base_url=API_BASE,
             timeout=timeout,
             follow_redirects=False,
-            headers={"User-Agent": "avito-raw-export/0.3.4"},
+            headers={"User-Agent": "avito-raw-export/0.3.5"},
         )
 
     def close(self) -> None:
@@ -234,7 +234,7 @@ class AvitoClient:
         with httpx.Client(
             timeout=60.0,
             follow_redirects=False,
-            headers={"User-Agent": "avito-raw-export/0.3.4"},
+            headers={"User-Agent": "avito-raw-export/0.3.5"},
         ) as client:
             for attempt in range(attempts):
                 try:
@@ -281,7 +281,7 @@ class AvitoClient:
         with httpx.Client(
             timeout=httpx.Timeout(60, connect=20),
             follow_redirects=False,
-            headers={"User-Agent": "avito-raw-export/0.3.4"},
+            headers={"User-Agent": "avito-raw-export/0.3.5"},
         ) as client:
             for attempt in range(attempts):
                 target = url

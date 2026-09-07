@@ -22,11 +22,17 @@ def build_analysis_ready(archive_root: Path) -> AnalysisReadyResult:
     archive_root = archive_root.resolve()
     _validate_archive(archive_root)
     output = archive_root / "analysis_ready"
-    chats_output = output / "chats"
-    chats_output.mkdir(parents=True, exist_ok=True)
+    conversations_output = output / "conversations"
+    human_output = output / "human_readable"
+    legacy_chats_output = output / "chats"
+    conversations_output.mkdir(parents=True, exist_ok=True)
+    human_output.mkdir(parents=True, exist_ok=True)
+    legacy_chats_output.mkdir(parents=True, exist_ok=True)
 
     chat_ids = _load_chat_ids(archive_root)
+    items = _load_items(archive_root)
     index_rows: list[dict[str, Any]] = []
+    conversations: list[dict[str, Any]] = []
     total_messages = 0
 
     for chat_id in chat_ids:
@@ -35,39 +41,46 @@ def build_analysis_ready(archive_root: Path) -> AnalysisReadyResult:
             archive_root / "raw" / "chats" / "details" / f"{safe_id}.json"
         )
         messages = _load_messages(archive_root / "raw" / "messages" / safe_id)
-        analysis_chat = _analysis_chat(chat_id, chat_detail, messages)
-        total_messages += len(analysis_chat["messages"])
+        conversation = _conversation(chat_id, safe_id, chat_detail, messages, items)
+        conversations.append(conversation)
+        total_messages += len(conversation["messages"])
 
-        json_name = f"chat_{safe_id}.json"
-        txt_name = f"chat_{safe_id}.txt"
-        atomic_json(chats_output / json_name, analysis_chat)
+        json_name = f"conversation_{safe_id}.json"
+        txt_name = f"conversation_{safe_id}.txt"
+        atomic_json(conversations_output / json_name, conversation)
         atomic_bytes(
-            chats_output / txt_name,
-            _render_chat_txt(analysis_chat).encode("utf-8"),
+            human_output / txt_name,
+            _render_chat_txt(conversation).encode("utf-8"),
+        )
+        legacy_json_name = f"chat_{safe_id}.json"
+        legacy_txt_name = f"chat_{safe_id}.txt"
+        atomic_json(legacy_chats_output / legacy_json_name, conversation)
+        atomic_bytes(
+            legacy_chats_output / legacy_txt_name,
+            _render_chat_txt(conversation).encode("utf-8"),
         )
         index_rows.append(
             {
-                "safe_chat_id": safe_id,
+                "conversation_id": safe_id,
                 "chat_id": chat_id,
-                "item_id": analysis_chat.get("item_id"),
-                "title": _chat_title(chat_detail),
-                "chat_type": _first_present(chat_detail, ("type", "chat_type", "chatType")),
-                "first_message_at": analysis_chat.get("first_message_at"),
-                "last_message_at": analysis_chat.get("last_message_at"),
-                "message_count": analysis_chat.get("message_count", 0),
-                "incoming_message_count": analysis_chat.get(
-                    "incoming_message_count", 0
-                ),
-                "outgoing_message_count": analysis_chat.get(
-                    "outgoing_message_count", 0
-                ),
-                "json_file": f"chats/{json_name}",
-                "txt_file": f"chats/{txt_name}",
+                "item_id": conversation.get("item_id"),
+                "item_title": conversation.get("item_title"),
+                "first_message_at": conversation.get("first_message_at"),
+                "last_message_at": conversation.get("last_message_at"),
+                "message_count": conversation.get("message_count", 0),
+                "incoming_count": conversation.get("incoming_count", 0),
+                "outgoing_count": conversation.get("outgoing_count", 0),
+                "json_path": f"conversations/{json_name}",
+                "txt_path": f"human_readable/{txt_name}",
             }
         )
 
-    atomic_json(output / "chats_index.json", index_rows)
-    _write_csv(output / "chats_index.csv", index_rows)
+    atomic_json(output / "items.json", list(items.values()))
+    atomic_json(output / "corpus_manifest.json", _corpus_manifest(conversations, items))
+    _write_jsonl(output / "conversations.jsonl", conversations)
+    _write_csv(output / "conversations_index.csv", index_rows)
+    atomic_json(output / "chats_index.json", _legacy_index(index_rows))
+    _write_csv(output / "chats_index.csv", _legacy_index(index_rows), legacy=True)
     atomic_bytes((output / "README.txt"), _readme().encode("utf-8"))
     return AnalysisReadyResult(output, len(index_rows), total_messages)
 
@@ -113,22 +126,35 @@ def _load_messages(message_root: Path) -> list[dict[str, Any]]:
     return sorted(rows, key=_message_sort_key)
 
 
-def _analysis_chat(
-    chat_id: str, chat_detail: dict[str, Any], messages: list[dict[str, Any]]
+def _conversation(
+    chat_id: str,
+    safe_id: str,
+    chat_detail: dict[str, Any],
+    messages: list[dict[str, Any]],
+    items: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     incoming = sum(1 for message in messages if message.get("direction") == "incoming")
     outgoing = sum(1 for message in messages if message.get("direction") == "outgoing")
     item_id = _extract_item_id(chat_detail)
+    item = items.get(str(item_id)) if item_id is not None else None
+    item_context = item or _context_item(chat_detail.get("context"))
     first = messages[0]["datetime"] if messages else None
     last = messages[-1]["datetime"] if messages else None
     result: dict[str, Any] = {
+        "conversation_id": safe_id,
         "chat_id": chat_id,
+        "item_context": item_context,
         "context": chat_detail.get("context") if chat_detail else None,
+        "item_title": _item_title(item_context) or _chat_title(chat_detail),
+        "category": _item_category(item_context),
+        "url": _item_url(item_context),
+        "status": _item_status(item_context),
+        "price": _item_price(item_context),
         "first_message_at": first,
         "last_message_at": last,
         "message_count": len(messages),
-        "incoming_message_count": incoming,
-        "outgoing_message_count": outgoing,
+        "incoming_count": incoming,
+        "outgoing_count": outgoing,
         "messages": messages,
     }
     if item_id is not None:
@@ -145,6 +171,7 @@ def _analysis_message(message: dict[str, Any]) -> dict[str, Any]:
         "timestamp": timestamp,
         "datetime": _datetime(timestamp),
         "direction": _direction(message),
+        "role": _role(_direction(message)),
         "author_id": _author_id(message),
         "type": _message_type(message),
         "text": _message_text(message),
@@ -262,6 +289,14 @@ def _speaker(direction: Any) -> str:
     return "Неизвестный участник"
 
 
+def _role(direction: str) -> str:
+    if direction == "incoming":
+        return "client"
+    if direction == "outgoing":
+        return "seller"
+    return "unknown"
+
+
 def _placeholder(kind: Any) -> str:
     normalized = str(kind or "").lower()
     if "voice" in normalized:
@@ -277,27 +312,49 @@ def _placeholder(kind: Any) -> str:
     return ""
 
 
-def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
-    fields = [
-        "safe_chat_id",
-        "chat_id",
-        "item_id",
-        "title",
-        "chat_type",
-        "first_message_at",
-        "last_message_at",
-        "message_count",
-        "incoming_message_count",
-        "outgoing_message_count",
-        "json_file",
-        "txt_file",
-    ]
+def _write_csv(path: Path, rows: list[dict[str, Any]], *, legacy: bool = False) -> None:
+    fields = (
+        [
+            "safe_chat_id",
+            "chat_id",
+            "item_id",
+            "title",
+            "chat_type",
+            "first_message_at",
+            "last_message_at",
+            "message_count",
+            "incoming_message_count",
+            "outgoing_message_count",
+            "json_file",
+            "txt_file",
+        ]
+        if legacy
+        else [
+            "conversation_id",
+            "chat_id",
+            "item_id",
+            "item_title",
+            "first_message_at",
+            "last_message_at",
+            "message_count",
+            "incoming_count",
+            "outgoing_count",
+            "json_path",
+            "txt_path",
+        ]
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8-sig") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
         for row in rows:
             writer.writerow({field: row.get(field, "") for field in fields})
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = "".join(json.dumps(row, ensure_ascii=False, default=str) + "\n" for row in rows)
+    atomic_bytes(path, body.encode("utf-8"))
 
 
 def _load_json_object(path: Path) -> dict[str, Any]:
@@ -316,6 +373,126 @@ def _extract_item_id(chat: dict[str, Any]) -> str | int | None:
             if item_id is not None:
                 return item_id
     return _first_present(chat, ("item_id", "itemId"))
+
+
+def _load_items(archive_root: Path) -> dict[str, dict[str, Any]]:
+    items: dict[str, dict[str, Any]] = {}
+    for path in sorted((archive_root / "raw" / "items" / "details").glob("*.json")):
+        item = _load_json_object(path)
+        item_id = _first_present(item, ("id", "item_id", "itemId"))
+        if item_id is not None:
+            items[str(item_id)] = item
+    for path in sorted((archive_root / "raw" / "items" / "lists").rglob("*.json")):
+        payload = _load_json_object(path)
+        resources = payload.get("resources")
+        if not isinstance(resources, list):
+            continue
+        for item in resources:
+            if not isinstance(item, dict):
+                continue
+            item_id = _first_present(item, ("id", "item_id", "itemId"))
+            if item_id is not None:
+                items.setdefault(str(item_id), item)
+    return dict(sorted(items.items()))
+
+
+def _context_item(context: Any) -> dict[str, Any] | None:
+    if not isinstance(context, dict):
+        return None
+    value = context.get("value")
+    if isinstance(value, dict):
+        return value
+    return context
+
+
+def _item_title(item: dict[str, Any] | None) -> str | None:
+    if not isinstance(item, dict):
+        return None
+    value = _first_present(item, ("title", "name"))
+    return str(value) if value is not None else None
+
+
+def _item_category(item: dict[str, Any] | None) -> Any:
+    if not isinstance(item, dict):
+        return None
+    return _first_present(item, ("category", "category_name", "categoryName"))
+
+
+def _item_url(item: dict[str, Any] | None) -> str | None:
+    if not isinstance(item, dict):
+        return None
+    value = _first_present(item, ("url", "uri", "link"))
+    return str(value) if value is not None else None
+
+
+def _item_status(item: dict[str, Any] | None) -> Any:
+    if not isinstance(item, dict):
+        return None
+    return _first_present(item, ("status", "state"))
+
+
+def _item_price(item: dict[str, Any] | None) -> Any:
+    if not isinstance(item, dict):
+        return None
+    return _first_present(item, ("price", "price_value", "priceValue"))
+
+
+def _corpus_manifest(
+    conversations: list[dict[str, Any]], items: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    first_values = [row.get("first_message_at") for row in conversations if row.get("first_message_at")]
+    last_values = [row.get("last_message_at") for row in conversations if row.get("last_message_at")]
+    missing_item_context = sum(1 for row in conversations if not row.get("item_context"))
+    missing_timestamps = sum(
+        1
+        for row in conversations
+        for message in row.get("messages", [])
+        if isinstance(message, dict) and message.get("timestamp") is None
+    )
+    return {
+        "format": "avito-raw-export-analysis-ready-v1",
+        "created_at": datetime.now(UTC).isoformat(),
+        "conversation_count": len(conversations),
+        "message_count": sum(int(row.get("message_count") or 0) for row in conversations),
+        "item_count": len(items),
+        "first_message_at": min(first_values) if first_values else None,
+        "last_message_at": max(last_values) if last_values else None,
+        "sources": [
+            "manifest.json",
+            "index/discovered_chat_ids.json",
+            "raw/chats/details/*.json",
+            "raw/messages/*/offset_*.json",
+            "raw/items/details/*.json",
+            "raw/items/lists/**/*.json",
+        ],
+        "limitations": {
+            "raw_is_source_of_truth": True,
+            "generated_without_api_requests": True,
+            "missing_item_context_conversations": missing_item_context,
+            "messages_without_timestamp": missing_timestamps,
+            "classification_or_summary": False,
+        },
+    }
+
+
+def _legacy_index(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "safe_chat_id": row.get("conversation_id"),
+            "chat_id": row.get("chat_id"),
+            "item_id": row.get("item_id"),
+            "title": row.get("item_title"),
+            "chat_type": None,
+            "first_message_at": row.get("first_message_at"),
+            "last_message_at": row.get("last_message_at"),
+            "message_count": row.get("message_count"),
+            "incoming_message_count": row.get("incoming_count"),
+            "outgoing_message_count": row.get("outgoing_count"),
+            "json_file": row.get("json_path"),
+            "txt_file": row.get("txt_path"),
+        }
+        for row in rows
+    ]
 
 
 def _chat_title(chat: dict[str, Any]) -> str | None:
@@ -348,13 +525,18 @@ def _first_present(mapping: dict[str, Any], keys: tuple[str, ...]) -> Any:
 
 def _readme() -> str:
     return (
-        "analysis_ready — производный слой для чтения и анализа.\n\n"
-        "chats_index.csv — общий список чатов для таблиц.\n"
-        "chats_index.json — тот же индекс в JSON.\n"
-        "chats/*.txt — человекочитаемые переписки, их удобно открывать или "
+        "analysis_ready — AI-ready корпус переписок Avito.\n\n"
+        "conversations.jsonl — главный машинный артефакт: одна строка JSON = "
+        "одна полная переписка с контекстом объявления.\n"
+        "conversations_index.csv — общий список переписок для фильтрации.\n"
+        "items.json — справочник объявлений, найденных в RAW.\n"
+        "conversations/*.json — один самодостаточный чат в структурированном "
+        "формате.\n"
+        "human_readable/*.txt — человекочитаемые переписки, их удобно открывать или "
         "загружать в ChatGPT.\n"
-        "chats/*.json — один чат в структурированном формате для программного "
-        "анализа.\n\n"
+        "corpus_manifest.json — счётчики, период данных, источники и ограничения.\n\n"
         "RAW остаётся исходным источником истины. Эта папка построена локально, "
-        "без новых запросов к Avito, и не изменяет raw/.\n"
+        "без новых запросов к Avito, и не изменяет raw/.\n\n"
+        "AI-классификация, summary, RAG и оценка качества диалогов здесь не "
+        "выполняются.\n"
     )

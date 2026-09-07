@@ -26,6 +26,17 @@ def make_archive(root: Path, chat_id: str = "chat/unsafe:1") -> Path:
             "context": {"value": {"id": 111, "title": "Synthetic item"}},
         },
     )
+    write_json(
+        archive / "raw" / "items" / "details" / "111.json",
+        {
+            "id": 111,
+            "title": "Synthetic item detail",
+            "category": "Synthetic category",
+            "url": "https://www.avito.ru/synthetic",
+            "status": "active",
+            "price": 12345,
+        },
+    )
     return archive
 
 
@@ -97,10 +108,12 @@ def test_analysis_ready_merges_pages_deduplicates_and_sorts(tmp_path: Path):
 
     result = build_analysis_ready(archive)
 
-    chat_json = json.loads(
-        (result.root / "chats" / f"chat_{safe_id}.json").read_text(encoding="utf-8")
+    conversation = json.loads(
+        (result.root / "conversations" / f"conversation_{safe_id}.json").read_text(
+            encoding="utf-8"
+        )
     )
-    assert [message["message_id"] for message in chat_json["messages"]] == [
+    assert [message["message_id"] for message in conversation["messages"]] == [
         "m1",
         "m2",
         "m3",
@@ -108,16 +121,24 @@ def test_analysis_ready_merges_pages_deduplicates_and_sorts(tmp_path: Path):
         "m5",
         "m6",
     ]
-    assert chat_json["message_count"] == 6
-    assert chat_json["incoming_message_count"] == 3
-    assert chat_json["outgoing_message_count"] == 2
-    assert chat_json["messages"][0]["direction"] == "incoming"
-    assert chat_json["messages"][1]["direction"] == "outgoing"
-    assert chat_json["messages"][0]["text"] == "First"
-    assert chat_json["messages"][-1]["text"] == ""
-    assert chat_json["item_id"] == 111
+    assert conversation["message_count"] == 6
+    assert conversation["incoming_count"] == 3
+    assert conversation["outgoing_count"] == 2
+    assert conversation["messages"][0]["direction"] == "incoming"
+    assert conversation["messages"][0]["role"] == "client"
+    assert conversation["messages"][1]["direction"] == "outgoing"
+    assert conversation["messages"][1]["role"] == "seller"
+    assert conversation["messages"][4]["role"] == "unknown"
+    assert conversation["messages"][0]["text"] == "First"
+    assert conversation["messages"][-1]["text"] == ""
+    assert conversation["item_id"] == 111
+    assert conversation["item_title"] == "Synthetic item detail"
+    assert conversation["category"] == "Synthetic category"
+    assert conversation["url"] == "https://www.avito.ru/synthetic"
+    assert conversation["status"] == "active"
+    assert conversation["price"] == 12345
 
-    text = (result.root / "chats" / f"chat_{safe_id}.txt").read_text(
+    text = (result.root / "human_readable" / f"conversation_{safe_id}.txt").read_text(
         encoding="utf-8"
     )
     assert "Клиент:" in text
@@ -139,29 +160,55 @@ def test_analysis_ready_writes_index_and_safe_files(tmp_path: Path):
 
     result = build_analysis_ready(archive)
 
+    conversations_index = json.loads(
+        (result.root / "conversations.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    )
+    assert conversations_index["conversation_id"] == safe_id
+    assert conversations_index["item_context"]["id"] == 111
+    assert conversations_index["messages"][0]["role"] == "client"
     index = json.loads((result.root / "chats_index.json").read_text(encoding="utf-8"))
     assert index == [
         {
             "safe_chat_id": safe_id,
             "chat_id": chat_id,
             "item_id": 111,
-            "title": "Synthetic item",
-            "chat_type": "u2i",
+            "title": "Synthetic item detail",
+            "chat_type": None,
             "first_message_at": "1970-01-01T00:00:01+00:00",
             "last_message_at": "1970-01-01T00:00:01+00:00",
             "message_count": 1,
             "incoming_message_count": 1,
             "outgoing_message_count": 0,
-            "json_file": f"chats/chat_{safe_id}.json",
-            "txt_file": f"chats/chat_{safe_id}.txt",
+            "json_file": f"conversations/conversation_{safe_id}.json",
+            "txt_file": f"human_readable/conversation_{safe_id}.txt",
         }
     ]
-    with (result.root / "chats_index.csv").open(encoding="utf-8-sig") as stream:
+    with (result.root / "conversations_index.csv").open(
+        encoding="utf-8-sig"
+    ) as stream:
         rows = list(csv.DictReader(stream))
-    assert rows[0]["safe_chat_id"] == safe_id
-    assert rows[0]["json_file"] == f"chats/chat_{safe_id}.json"
+    assert rows[0]["conversation_id"] == safe_id
+    assert rows[0]["json_path"] == f"conversations/conversation_{safe_id}.json"
+    assert rows[0]["txt_path"] == f"human_readable/conversation_{safe_id}.txt"
     assert "/" not in safe_id and ":" not in safe_id
     assert (result.root / "README.txt").exists()
+    assert json.loads((result.root / "items.json").read_text(encoding="utf-8")) == [
+        {
+            "id": 111,
+            "title": "Synthetic item detail",
+            "category": "Synthetic category",
+            "url": "https://www.avito.ru/synthetic",
+            "status": "active",
+            "price": 12345,
+        }
+    ]
+    manifest = json.loads(
+        (result.root / "corpus_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["conversation_count"] == 1
+    assert manifest["message_count"] == 1
+    assert manifest["item_count"] == 1
+    assert manifest["limitations"]["generated_without_api_requests"] is True
 
 
 def test_analysis_ready_uses_existing_archive_without_api_client(tmp_path: Path):
