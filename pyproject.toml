@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "avito-raw-export"
-version = "0.3.3"
+version = "0.3.4"
 description = "Read-only local UI for maximum raw export of data available through Avito Business API."
 readme = "README.md"
 requires-python = ">=3.11"

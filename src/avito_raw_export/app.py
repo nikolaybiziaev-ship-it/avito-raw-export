@@ -18,6 +18,7 @@ import avito_raw_export
 from . import __version__
 from .client import AvitoClient
 from . import client as client_module
+from .analysis_ready import build_analysis_ready
 from .recovery import unfinished_exports
 from .store import atomic_json
 from .config import Profile, ProfileStore
@@ -39,6 +40,7 @@ class AppState:
         self.running = False
         self.active_exporter = None
         self.last_export: Path | None = None
+        self.analysis_running = False
         self.task: asyncio.Task | None = None
 
 
@@ -184,6 +186,9 @@ def build_page() -> None:
             resume_select = ui.select(
                 options={}, label="Незавершённая выгрузка"
             ).classes("w-full")
+            analysis_archive = ui.input(
+                "Архив для анализа", placeholder="Путь к completed/partial архиву"
+            ).classes("w-full")
             recovery_label = ui.label("").classes("text-sm")
 
             def refresh_exports():
@@ -199,6 +204,8 @@ def build_page() -> None:
                     if found
                     else "Незавершённых выгрузок в этой папке нет."
                 )
+                if found and not analysis_archive.value:
+                    analysis_archive.value = str(found[0][0])
 
             export_root.on_value_change(lambda _: refresh_exports())
             refresh_exports()
@@ -328,12 +335,55 @@ def build_page() -> None:
 
                 state.task = asyncio.create_task(runner())
 
+            async def prepare_analysis_ready() -> None:
+                if state.analysis_running:
+                    ui.notify("Подготовка уже идёт", type="warning")
+                    return
+                selected = state.last_export
+                if selected is None and (analysis_archive.value or "").strip():
+                    selected = Path(analysis_archive.value)
+                if selected is None and resume_select.value:
+                    selected = Path(resume_select.value)
+                if selected is None:
+                    ui.notify("Сначала выберите или завершите выгрузку", type="warning")
+                    return
+                state.analysis_running = True
+                analysis_button.disable()
+                stage_label.text = "Готовлю переписки для анализа"
+                detail_label.text = str(selected)
+                progress.value = max(progress.value, 0.05)
+
+                def work():
+                    return build_analysis_ready(selected)
+
+                try:
+                    result = await asyncio.to_thread(work)
+                    state.last_export = selected
+                    progress.value = 1.0
+                    stage_label.text = "analysis_ready готов"
+                    detail_label.text = str(result.root)
+                    log_box.push(
+                        "✓ Подготовлено для анализа: "
+                        f"{result.chats} чатов, {result.messages} сообщений"
+                    )
+                    ui.notify(f"Папка готова: {result.root}", type="positive")
+                except Exception as exc:
+                    detail_label.text = str(exc)
+                    log_box.push(f"✗ Не удалось подготовить analysis_ready: {exc}")
+                    ui.notify(str(exc), type="negative", timeout=12000)
+                finally:
+                    state.analysis_running = False
+                    analysis_button.enable()
+
             start_button = ui.button(
                 "Выгрузить историю переписок", on_click=lambda: start_export(False)
             ).classes("text-lg")
             resume_button = ui.button(
                 "Продолжить последнюю выгрузку", on_click=lambda: start_export(True)
             ).classes("text-lg")
+            analysis_button = ui.button(
+                "Подготовить для анализа", on_click=prepare_analysis_ready
+            ).props("outline").classes("text-lg")
 
             def stop_export():
                 if state.active_exporter:
@@ -400,6 +450,7 @@ def build_page() -> None:
                     elif kind == "done":
                         state.running = False
                         state.last_export = Path(payload)
+                        analysis_archive.value = str(state.last_export)
                         start_button.enable()
                         resume_button.enable()
                         refresh_exports()
