@@ -57,7 +57,7 @@ class AvitoClient:
             base_url=API_BASE,
             timeout=timeout,
             follow_redirects=False,
-            headers={"User-Agent": "avito-raw-export/0.3"},
+            headers={"User-Agent": "avito-raw-export/0.3.2"},
         )
 
     def close(self) -> None:
@@ -183,11 +183,7 @@ class AvitoClient:
             raise ValueError("JSON body must be an object")
         if not self._token:
             self.authenticate()
-        account_id = path.split("/accounts/", 1)[1].split("/", 1)[0]
-        headers = {
-            "Authorization": f"Bearer {self._token}",
-            "X-AgencyClientId": account_id,
-        }
+        headers = {"Authorization": f"Bearer {self._token}"}
         last: RawResponse | None = None
         refreshed = False
         for attempt in range(attempts):
@@ -205,10 +201,7 @@ class AvitoClient:
             if response.status_code == 401 and not refreshed and attempt < attempts - 1:
                 refreshed = True
                 self.authenticate()
-                headers = {
-                    "Authorization": f"Bearer {self._token}",
-                    "X-AgencyClientId": account_id,
-                }
+                headers = {"Authorization": f"Bearer {self._token}"}
                 continue
             if response.status_code == 429:
                 if attempt < attempts - 1:

@@ -19,9 +19,11 @@ def classify(where, error):
         and "Объявление не принадлежит пользователю" in body
     ):
         return "unavailable_by_api", "foreign_item", False
-    if status in (403, 404, 410):
-        return "unavailable_by_api", f"http_{status}", False
+    if where == "statistics-window" and status == 403:
+        return "no_permission", "http_403", False
     if where == "statistics-window" and status in (400, 422):
+        return "malformed_request", f"http_{status}", True
+    if status in (403, 404, 410):
         return "unavailable_by_api", f"http_{status}", False
     if (
         status == 429

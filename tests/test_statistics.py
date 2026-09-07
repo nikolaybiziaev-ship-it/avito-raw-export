@@ -127,7 +127,7 @@ def run_stats(tmp_path, monkeypatch, windows, client=None, resume_from=None):
 
 def item_window(day="2025-01-01"):
     current = date.fromisoformat(day)
-    return StatisticsWindow("items_daily", current, current, "totals")
+    return StatisticsWindow("items_daily", current, current, "item")
 
 
 def test_basic_export_without_media_or_voice_is_completed(tmp_path):
@@ -171,7 +171,7 @@ def test_statistics_paginates_to_total_count(tmp_path, monkeypatch):
                     "groupings": [
                         {
                             "id": offset + number + 1,
-                            "type": "totals",
+                            "type": "item",
                             "metrics": [{"slug": "views", "value": 1}],
                         }
                         for number in range(size)
@@ -225,8 +225,66 @@ def test_malformed_statistics_response_is_partial_and_stops_family(tmp_path, mon
     )
     manifest = json.loads((result / "manifest.json").read_bytes())
     assert manifest["status"] == "partial"
+    assert manifest["stages"]["statistics_backfill"]["status"] == "partial"
+    assert manifest["stages"]["statistics_done"]["status"] == "partial"
     assert len(client.calls) == 1
     assert list((result / "raw/requests").glob("*.json"))
+
+
+def test_live_agency_denied_is_warning_partial_and_stops_endpoint_families(
+    tmp_path, monkeypatch
+):
+    denied = {
+        "result": {"status": False, "message": "agency access denied"}
+    }
+    client = StatsClient(lambda path, body: post_raw(path, denied, status=403))
+    day = date.fromisoformat("2025-01-01")
+    windows = [
+        StatisticsWindow("items_daily", day, day, "item"),
+        StatisticsWindow("account_daily", day, day, "day"),
+        StatisticsWindow("spendings_daily", day, day, "day"),
+    ]
+
+    exporter, result = run_stats(tmp_path, monkeypatch, windows, client)
+    manifest = json.loads((result / "manifest.json").read_bytes())
+
+    assert len(client.calls) == 2
+    assert exporter.stats.errors == 0
+    assert exporter.stats.warnings == 2
+    assert exporter.stats.statistics_periods == 0
+    assert exporter.stats.statistics_records == 0
+    assert exporter.stats.statistics_status == (
+        "Статистика недоступна: HTTP 403 — нет доступа"
+    )
+    assert manifest["status"] == "partial"
+    assert manifest["statistics"] == {
+        "status": "partial",
+        "planned_periods": 3,
+        "completed_periods": 0,
+        "records": 0,
+        "failed_requests": 2,
+        "skipped_periods": 1,
+        "reason": "Статистика недоступна: HTTP 403 — нет доступа",
+    }
+    assert manifest["stages"]["statistics_discovery"]["status"] == "completed"
+    assert manifest["stages"]["statistics_backfill"]["status"] == "partial"
+    assert manifest["stages"]["statistics_done"]["status"] == "partial"
+
+
+def test_statistics_bad_request_is_error_partial(tmp_path, monkeypatch):
+    client = StatsClient(
+        lambda path, body: post_raw(
+            path,
+            {"result": {"status": False, "message": "invalid request"}},
+            status=400,
+        )
+    )
+    exporter, result = run_stats(tmp_path, monkeypatch, [item_window()], client)
+    manifest = json.loads((result / "manifest.json").read_bytes())
+    assert exporter.stats.errors == 1
+    assert exporter.stats.warnings == 0
+    assert manifest["status"] == "partial"
+    assert manifest["statistics"]["reason"] == "Статистика: ошибка запроса — HTTP 400"
 
 
 def test_empty_statistics_is_valid(tmp_path, monkeypatch):
@@ -238,7 +296,13 @@ def test_empty_statistics_is_valid(tmp_path, monkeypatch):
     exporter, result = run_stats(tmp_path, monkeypatch, [item_window()], client)
     assert exporter.stats.statistics_periods == 1
     assert exporter.stats.statistics_records == 0
-    assert json.loads((result / "manifest.json").read_bytes())["status"] == "completed"
+    manifest = json.loads((result / "manifest.json").read_bytes())
+    assert exporter.stats.statistics_status == (
+        "Статистика: 0 записей, обработано 1 периодов"
+    )
+    assert manifest["status"] == "completed"
+    assert manifest["statistics"]["status"] == "completed"
+    assert manifest["stages"]["statistics_done"]["status"] == "completed"
 
 
 def test_documented_horizons_and_windows():
@@ -249,7 +313,8 @@ def test_documented_horizons_and_windows():
     assert len(items) == 270
     assert items[0].date_from == date(2025, 12, 11)
     assert items[-1].date_to == date(2026, 9, 6)
-    assert spendings[0].date_from == date(2025, 4, 15)
+    assert all(w.grouping == "item" for w in items)
+    assert spendings[0].date_from == date(2025, 12, 11)
     assert spendings[-1].date_to == date(2026, 9, 6)
 
 
@@ -291,7 +356,7 @@ def test_statistics_429_retry_after(monkeypatch):
             json_body={"dateFrom": "2025-01-01"},
         )
     assert route.call_count == 2 and delays == [7]
-    assert route.calls[0].request.headers["X-AgencyClientId"] == "1"
+    assert "X-AgencyClientId" not in route.calls[0].request.headers
 
 
 @respx.mock

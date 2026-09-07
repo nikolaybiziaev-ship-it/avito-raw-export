@@ -46,6 +46,8 @@ ITEM_METRICS = (
     "oldActiveItems",
 )
 
+STATISTICS_MIN_INTERVAL_SECONDS = 60.0
+
 
 @dataclass(frozen=True, slots=True)
 class StatisticsWindow:
@@ -73,21 +75,27 @@ def date_windows(end: date, horizon_days: int, window_days: int):
 class StatisticsBackfill:
     """Backfill exact daily item data, account daily data, and daily spendings."""
 
-    def __init__(self, exporter, *, today: date | None = None, min_interval=0.61):
+    def __init__(
+        self,
+        exporter,
+        *,
+        today: date | None = None,
+        min_interval=STATISTICS_MIN_INTERVAL_SECONDS,
+    ):
         self.exporter = exporter
         self.today = today or datetime.now(UTC).date()
         self.min_interval = min_interval
         self._last_request = 0.0
 
     def windows(self):
-        # `totals` returns item IDs. One-day windows retain item-level daily detail.
+        # One-day windows with `item` retain per-item daily detail.
         for start, end in date_windows(self.today, 270, 1):
-            yield StatisticsWindow("items_daily", start, end, "totals")
+            yield StatisticsWindow("items_daily", start, end, "item")
         # `day` returns account-level timestamp groups. Larger request windows are safe
         # because the public contract gives a horizon, not a smaller date-range limit.
         for start, end in date_windows(self.today, 270, 90):
             yield StatisticsWindow("account_daily", start, end, "day")
-        for start, end in date_windows(self.today, 510, 90):
+        for start, end in date_windows(self.today, 270, 90):
             yield StatisticsWindow("spendings_daily", start, end, "day")
 
     def run(self):
@@ -100,8 +108,8 @@ class StatisticsBackfill:
                 "generated_at": datetime.now(UTC).isoformat(),
                 "item_metrics": list(ITEM_METRICS),
                 "item_horizon_days": 270,
-                "spendings_horizon_days": 510,
-                "request_limit_per_minute": 100,
+                "spendings_horizon_days": 270,
+                "request_limit_per_minute": 1,
                 "windows": [
                     {
                         "key": w.key,
@@ -120,9 +128,11 @@ class StatisticsBackfill:
             "statistics_backfill",
             f"Периодов осталось: {len(pending)} из {len(windows)}",
         )
-        blocked_sources = set()
+        blocked_endpoints = set()
+        failures = []
         for position, window in enumerate(pending, 1):
-            if window.source in blocked_sources:
+            endpoint = self._endpoint(window)
+            if endpoint in blocked_endpoints:
                 continue
             exp._check_stop()
             exp.stats.detail = (
@@ -132,7 +142,6 @@ class StatisticsBackfill:
             exp._notify()
             try:
                 records = self._fetch_window(window)
-                endpoint = self._endpoint(window)
                 exp.journal.statistics_commit(
                     window.key,
                     endpoint,
@@ -163,8 +172,49 @@ class StatisticsBackfill:
                 # One contract/permission/network failure is enough evidence to stop
                 # this endpoint family for the run. Resume retries its first missing
                 # window later and avoids hundreds of redundant failing requests.
-                blocked_sources.add(window.source)
-        exp._stage("statistics_done", "Историческая статистика сохранена")
+                blocked_endpoints.add(endpoint)
+                failures.append(exc)
+
+        periods, records = exp.journal.statistics_counts()
+        complete = all(exp.journal.statistics_done(w.key) for w in windows)
+        status = "completed" if complete else "partial"
+        detail = (
+            f"Статистика: {records} записей, обработано {periods} периодов"
+            if complete
+            else self._failure_summary(failures[0] if failures else None)
+        )
+        exp.stats.statistics_status = detail
+        exp.store.manifest["statistics"] = {
+            "status": status,
+            "planned_periods": len(windows),
+            "completed_periods": periods,
+            "records": records,
+            "failed_requests": len(failures),
+            "skipped_periods": len(windows) - periods - len(failures),
+            "reason": None if complete else detail,
+        }
+        exp._finish_stage(status, detail)
+        exp._stage("statistics_done", detail)
+        exp._finish_stage(status, detail)
+
+    @staticmethod
+    def _failure_summary(error):
+        status = getattr(error, "status_code", None)
+        if status == 403:
+            return "Статистика недоступна: HTTP 403 — нет доступа"
+        if status in (404, 410):
+            return f"Статистика недоступна: HTTP {status} — метод недоступен"
+        if status in (400, 422):
+            return f"Статистика: ошибка запроса — HTTP {status}"
+        if status == 429:
+            return "Статистика временно недоступна: HTTP 429"
+        if status is not None and status >= 500:
+            return f"Статистика временно недоступна: HTTP {status}"
+        if error is None:
+            return "Статистика выполнена не полностью"
+        if isinstance(error, ValueError):
+            return "Статистика: некорректный ответ API"
+        return "Статистика временно недоступна: ошибка сети"
 
     def _fetch_window(self, window):
         if window.source == "spendings_daily":

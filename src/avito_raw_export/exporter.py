@@ -54,6 +54,7 @@ class ExportStats:
     failed_media: int = 0
     statistics_records: int = 0
     statistics_periods: int = 0
+    statistics_status: str = "Статистика: ещё не запускалась"
     oldest_message: int | None = None
     newest_message: int | None = None
     stage: str = ""
@@ -943,6 +944,18 @@ class Exporter:
         self.stats.stage = stage
         self.stats.detail = detail
         self._notify()
+
+    def _finish_stage(self, status: str, detail: str) -> None:
+        if status not in ("completed", "partial") or not self._active_stage:
+            raise ValueError("Invalid stage completion")
+        self.store.manifest["stages"][self._active_stage] = {
+            "status": status,
+            "detail": detail,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        self.stats.detail = detail
+        self._notify()
+        self._active_stage = None
 
     def _notify(self) -> None:
         self._check_stop()

@@ -219,7 +219,7 @@ def build_page() -> None:
                 chat_counter = ui.label("Чаты: 0")
                 message_counter = ui.label("Сообщения: 0")
                 review_counter = ui.label("Отзывы: 0")
-                statistics_counter = ui.label("Статистика: 0 записей / 0 периодов")
+                statistics_counter = ui.label("Статистика: ещё не запускалась")
                 media_counter = ui.label("Медиа: 0")
                 error_counter = ui.label("Ошибки: 0")
                 warning_counter = ui.label("Предупреждения: 0")
@@ -370,10 +370,7 @@ def build_page() -> None:
                             f"Сообщения: {data.get('messages_seen', 0)}"
                         )
                         review_counter.text = f"Отзывы: {data.get('reviews_seen', 0)}"
-                        statistics_counter.text = (
-                            f"Статистика: {data.get('statistics_records', 0)} записей / "
-                            f"{data.get('statistics_periods', 0)} периодов"
-                        )
+                        statistics_counter.text = _statistics_text(data)
                         media_counter.text = f"Медиа: {data.get('media_files', 0)}"
                         error_counter.text = f"Ошибки: {data.get('errors', 0)}"
                         warning_counter.text = (
@@ -507,6 +504,16 @@ def _stage_name(stage: str) -> str:
         "media": "Медиафайлы",
         "done": "Готово",
     }.get(stage, stage or "Работа")
+
+
+def _statistics_text(data: dict[str, Any]) -> str:
+    status = data.get("statistics_status")
+    if isinstance(status, str) and status:
+        return status
+    return (
+        f"Статистика: {data.get('statistics_records', 0)} записей, "
+        f"обработано {data.get('statistics_periods', 0)} периодов"
+    )
 
 
 if __name__ == "__main__":
