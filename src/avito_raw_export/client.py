@@ -57,7 +57,7 @@ class AvitoClient:
             base_url=API_BASE,
             timeout=timeout,
             follow_redirects=False,
-            headers={"User-Agent": "avito-raw-export/0.3.2"},
+            headers={"User-Agent": "avito-raw-export/0.3.3"},
         )
 
     def close(self) -> None:

@@ -151,7 +151,11 @@ def test_full_mock_export(tmp_path: Path):
     exporter = Exporter(
         "client",
         "secret",
-        ExportOptions(export_root=tmp_path, download_avito_media=False),
+        ExportOptions(
+            export_root=tmp_path,
+            download_avito_media=False,
+            ratings_and_reviews=True,
+        ),
     )
     exporter.client.close()
     exporter.options.statistics = False
@@ -183,3 +187,24 @@ def test_full_mock_export(tmp_path: Path):
     paths = [call[1] for call in fake.calls if call[0] == "GET"]
     assert not any(path.endswith("/read") for path in paths)
     assert not any("blacklist" in path for path in paths)
+
+
+def test_default_export_is_chat_history_only(tmp_path: Path):
+    exporter = Exporter("client", "secret", ExportOptions(export_root=tmp_path))
+    exporter.client.close()
+    fake = FakeClient()
+    exporter.client = fake
+
+    result = exporter.run()
+    manifest = json.loads((result / "manifest.json").read_text())
+
+    assert manifest["status"] == "completed"
+    assert manifest["counts"]["chats"] == 1
+    assert manifest["counts"]["messages_seen"] == 1
+    assert manifest["counts"]["reviews_seen"] == 0
+    assert manifest["counts"]["statistics_periods"] == 0
+    assert "ratings" not in manifest["stages"]
+    assert not any(name.startswith("statistics") for name in manifest["stages"])
+    assert "voice" not in manifest["stages"]
+    assert "media" not in manifest["stages"]
+    assert not any(call[0] == "DOWNLOAD" for call in fake.calls)

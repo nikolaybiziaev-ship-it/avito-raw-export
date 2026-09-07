@@ -35,8 +35,8 @@ def test_entrypoint_binds_loopback_and_registers_per_client_page(monkeypatch):
 
 def test_runtime_diagnostics_identifies_loaded_client():
     diagnostics = app.runtime_diagnostics()
-    assert diagnostics["build_marker"].startswith("Avito Raw Export v0.3.2 — build ")
-    assert diagnostics["module_version"] == "0.3.2"
+    assert diagnostics["build_marker"].startswith("Avito Raw Export v0.3.3 — build ")
+    assert diagnostics["module_version"] == "0.3.3"
     assert Path(diagnostics["package_file"]).parts[-2:] == (
         "avito_raw_export",
         "__init__.py",
@@ -52,3 +52,13 @@ def test_statistics_text_explains_zero_periods():
     assert app._statistics_text({}) == "Статистика: 0 записей, обработано 0 периодов"
     warning = "Статистика недоступна: HTTP 403 — нет доступа"
     assert app._statistics_text({"statistics_status": warning}) == warning
+
+
+def test_default_ui_selection_is_chat_history_only():
+    assert app.DEFAULT_EXPORT_SELECTIONS == {
+        "chats": True,
+        "reviews": False,
+        "statistics": False,
+        "media": False,
+        "voice": False,
+    }

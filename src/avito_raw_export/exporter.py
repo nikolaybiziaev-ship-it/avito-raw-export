@@ -28,14 +28,14 @@ class ExportOptions:
     export_root: Path
     download_voice: bool = False
     download_avito_media: bool = False
-    statistics: bool = True
+    statistics: bool = False
     list_items: bool = True
     item_details: bool = True
     global_chats: bool = True
     chats_by_item: bool = True
     chat_details: bool = True
     messages: bool = True
-    ratings_and_reviews: bool = True
+    ratings_and_reviews: bool = False
     resume_from: Path | None = None
 
 

@@ -23,6 +23,14 @@ from .store import atomic_json
 from .config import Profile, ProfileStore
 from .exporter import Exporter, ExportOptions, ExportStats
 
+DEFAULT_EXPORT_SELECTIONS = {
+    "chats": True,
+    "reviews": False,
+    "statistics": False,
+    "media": False,
+    "voice": False,
+}
+
 
 class AppState:
     def __init__(self) -> None:
@@ -70,11 +78,11 @@ def build_page() -> None:
         ui.label(marker).classes(
             "w-full rounded bg-yellow-100 text-yellow-900 px-3 py-2 font-mono"
         )
-        ui.label("Максимальная сырая выгрузка данных Avito API").classes(
+        ui.label("Выгрузить историю переписок Avito").classes(
             "text-2xl font-bold"
         )
         ui.label(
-            "Инструмент ничего не отправляет и не меняет в Авито. Он использует только методы чтения и сохраняет ответы API как есть."
+            "По умолчанию сохраняются чаты и все доступные страницы сообщений. Отзывы, статистику и медиа можно включить отдельно."
         ).classes("text-base opacity-80")
 
         with ui.card().classes("w-full"):
@@ -195,18 +203,28 @@ def build_page() -> None:
             export_root.on_value_change(lambda _: refresh_exports())
             refresh_exports()
             ui.label(
-                "По умолчанию забираем всю историю, которую реально отдаёт API. Период заранее не режем."
+                "Основной сценарий — история переписок. Период заранее не ограничивается."
             ).classes("text-sm opacity-70")
 
             with ui.row().classes("gap-6"):
-                opt_chats = ui.checkbox("Чаты и сообщения", value=True)
-                opt_reviews = ui.checkbox("Отзывы", value=True)
-                opt_statistics = ui.checkbox("Статистика", value=True)
+                opt_chats = ui.checkbox(
+                    "Чаты и сообщения", value=DEFAULT_EXPORT_SELECTIONS["chats"]
+                )
+                opt_reviews = ui.checkbox(
+                    "Отзывы", value=DEFAULT_EXPORT_SELECTIONS["reviews"]
+                )
+                opt_statistics = ui.checkbox(
+                    "Статистика", value=DEFAULT_EXPORT_SELECTIONS["statistics"]
+                )
             with ui.row().classes("gap-6"):
                 download_media = ui.checkbox(
-                    "Скачивать изображения и медиа", value=False
+                    "Скачивать изображения и медиа",
+                    value=DEFAULT_EXPORT_SELECTIONS["media"],
                 )
-                download_voice = ui.checkbox("Скачивать голосовые", value=False)
+                download_voice = ui.checkbox(
+                    "Скачивать голосовые",
+                    value=DEFAULT_EXPORT_SELECTIONS["voice"],
+                )
 
         with ui.card().classes("w-full"):
             ui.label("3. Процесс").classes("text-lg font-bold")
@@ -311,7 +329,7 @@ def build_page() -> None:
                 state.task = asyncio.create_task(runner())
 
             start_button = ui.button(
-                "Начать новую", on_click=lambda: start_export(False)
+                "Выгрузить историю переписок", on_click=lambda: start_export(False)
             ).classes("text-lg")
             resume_button = ui.button(
                 "Продолжить последнюю выгрузку", on_click=lambda: start_export(True)

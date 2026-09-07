@@ -5,7 +5,7 @@ from test_exporter import FakeClient, raw
 from avito_raw_export.exporter import Exporter, ExportOptions
 
 
-def make_exporter(tmp_path, fake):
+def make_exporter(tmp_path, fake, *, ratings_and_reviews=False):
     exporter = Exporter(
         "test-client",
         "test-secret",
@@ -14,6 +14,7 @@ def make_exporter(tmp_path, fake):
             download_voice=False,
             download_avito_media=False,
             statistics=False,
+            ratings_and_reviews=ratings_and_reviews,
         ),
     )
     exporter.client.close()
@@ -60,7 +61,7 @@ def test_repeated_reviews_stop_with_error(tmp_path):
                 return raw(path, {"reviews": [{"id": 1}], "total": 500})
             return super().get(path, params=params)
 
-    exporter = make_exporter(tmp_path, Client())
+    exporter = make_exporter(tmp_path, Client(), ratings_and_reviews=True)
     result = exporter.run()
     assert exporter.stats.reviews_seen == 1
     assert json.loads((result / "manifest.json").read_text())["status"] == "partial"

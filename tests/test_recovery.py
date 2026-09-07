@@ -131,7 +131,7 @@ def test_foreign_item_422_is_one_warning_and_persisted(tmp_path):
             return super().get(path, params=params)
 
     client = Client()
-    first = make(tmp_path, client)
+    first = make(tmp_path, client, ratings_and_reviews=True)
     first.run()
     assert first.stats.errors == 0 and first.stats.warnings == 1
     assert sum(p.endswith("/items/222/") for method, p, _ in client.calls) == 1
