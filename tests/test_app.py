@@ -35,8 +35,8 @@ def test_entrypoint_binds_loopback_and_registers_per_client_page(monkeypatch):
 
 def test_runtime_diagnostics_identifies_loaded_client():
     diagnostics = app.runtime_diagnostics()
-    assert diagnostics["build_marker"].startswith("Avito Raw Export v0.3.6 — build ")
-    assert diagnostics["module_version"] == "0.3.6"
+    assert diagnostics["build_marker"].startswith("Avito Raw Export v0.4.0 — build ")
+    assert diagnostics["module_version"] == "0.4.0"
     assert Path(diagnostics["package_file"]).parts[-2:] == (
         "avito_raw_export",
         "__init__.py",

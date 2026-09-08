@@ -1,109 +1,58 @@
 # Avito Raw Export
 
-Отдельный open-source инструмент для регулярной локальной read-only выгрузки
-данных Avito Business API. Проект не связан с AI Sales Agent и не отправляет,
-не изменяет и не удаляет данные Avito.
+Avito Raw Export is a local, open-source, read-only tool for exporting available
+Avito Business API chat and message history. It preserves original API responses
+as a RAW archive and can build a compact AI-ready JSONL corpus for ChatGPT, Claude,
+DeepSeek, local LLMs, or your own analytics.
 
-Главный принцип: **API отдал поле → поле осталось в RAW**. Аналитика строится
-позже по локальному архиву, без повторного запроса данных.
+The tool runs on your computer, stores credentials locally, and does not send,
+mark as read, delete, or modify Avito data.
 
-## Стандартная выгрузка v0.3.6
+## Why Use It
 
-Текущий основной сценарий — **выгрузить историю чатов и сообщений Avito**.
-По умолчанию включены только:
+- Keep a local copy of available Avito conversation history.
+- Analyze real customer questions, objections, and sales patterns.
+- Prepare chat history for LLM analysis without locking data to one SaaS product.
+- Keep RAW API responses as the source of truth.
+- Use compact JSONL for analysis and full JSON files for audit.
+- Resume interrupted exports instead of starting over.
 
-- глобальный поиск чатов, дополнительный поиск по `item_id`, полные объекты чатов;
-- все доступные страницы сообщений;
-- оригинальные RAW-ответы, технические индексы и recovery.
+## What It Does
 
-Для максимального поиска связанных чатов экспортёр технически читает объявления
-всех доступных статусов и их карточки. Отзывы, статистика, изображения, аватарки,
-голосовые и другие бинарные медиа по умолчанию выключены. Каждый модуль можно
-отдельно включить в UI без изменения кода.
+- Connects to Avito Business API with OAuth client credentials.
+- Exports account metadata, listings needed for chat discovery, chats, full chat
+  objects, and all available message pages.
+- Preserves original RAW JSON responses and redacted request metadata.
+- Builds `analysis_ready/` from an existing archive without new API requests.
+- Separates conversations into `customer_item`, `avito_system`,
+  `avito_support`, and `other`.
+- Optionally exports reviews, historical statistics, Avito-hosted media, and
+  voice files.
+- Keeps exports, logs, profiles, tokens, and generated data outside Git.
 
-Если опциональные модули выключены, их стадии не запускаются, не попадают в
-`manifest.stages` и не влияют на `completed`/`partial`. После обработки чатов и
-сообщений экспорт завершается.
+## Quick Start On Windows
 
-## Историческая статистика
+1. Install Python 3.11 or newer.
+2. Download or clone this repository.
+3. Double-click `run_windows.bat`.
+4. Open `http://127.0.0.1:8765` if the browser does not open automatically.
+5. Enter a profile name, Client ID, and Client Secret for your Avito Business API
+   application.
+6. Click `Проверить подключение`, then `Сохранить профиль`.
+7. Choose an export folder outside the repository.
+8. Leave `Чаты и сообщения` enabled and click `Выгрузить историю переписок`.
+9. After export completion, click `Подготовить для анализа`.
 
-Реализация проверена по публичному контракту Avito Statistics API v2,
-актуальному на 7 сентября 2026 года:
+Manual run from source:
 
-- `POST /stats/v2/accounts/{user_id}/items` — показатели объявлений и клиента;
-- `POST /stats/v2/accounts/{user_id}/spendings` — расходы клиента.
+```bash
+python -m pip install -e .
+python -m avito_raw_export
+```
 
-Оба POST-метода только читают статистику. Они добавлены в закрытый allowlist;
-mutation-endpoints по-прежнему недоступны клиенту.
+## Output
 
-Метод `items` предоставляет группировки `day`, `week`, `month`, `item`, `totals`,
-пагинацию `limit/offset` с `limit <= 1000`, лимит один запрос в минуту и
-историю до 270 дней. Экспортёр делает однодневные запросы с `grouping=item`,
-чтобы сохранить дневные записи для каждого объявления, и отдельно получает
-дневные агрегаты аккаунта окнами до 90 дней.
-
-Запрашиваются все показатели действующего контракта:
-
-`views`, `contacts`, `contactsShowPhone`, `contactsMessenger`,
-`contactsShowPhoneAndMessenger`, `contactsSbcDiscount`,
-`viewsToContactsConversion`, `favorites`, `averageViewCost`,
-`averageContactCost`, `impressions`, `impressionsToViewsConversion`,
-`clickPackages`, `jobContacts`, `viewsToOrderedItemsConversion`,
-`orderedItems`, `orderedItemsPrice`, `deliveredItems`, `deliveredItemsPrice`,
-`bookingPlacedCount`, `bookingPlacedPrice`, `bookingApprovedCount`,
-`bookingApprovedPrice`, `bookingAcceptedCount`, `bookingAcceptedPrice`,
-`allSpending`, `spending`, `presenceSpending`, `promoSpending`,
-`restSpending`, `commission`, `spendingBonus`, `activeItems`,
-`newActiveItems`, `oldActiveItems`.
-
-Avito не возвращает показатель, недоступный конкретному клиенту. `views` и
-`contacts` по описанию контракта дедуплицируются по пользователю в пределах суток.
-Отдельной метрики подтверждённых звонков нет: `contactsShowPhone` включает
-просмотр телефона или нажатие «Позвонить».
-
-Метод `spendings` предоставляет группировки `day/week/month`, категории
-`promotion`, `presence`, `commission`, `rest`, детализацию по услугам, лимит
-один запрос в минуту и историю до 270 дней. Экспортёр запрашивает `["all"]`
-и сохраняет дневные окна по 90 дней. Публичный контракт не задаёт более короткий
-максимальный диапазон запроса. Фильтр `itemIDs` есть только у расходов; его
-максимальный размер контрактом не указан. Для `items` доступны фильтры категорий
-и сотрудников, но не список `item_id`.
-
-Источник: [официальный каталог Avito API](https://developers.avito.ru/api-catalog/item/documentation)
-и [машиночитаемая копия Item OpenAPI](https://raw.githubusercontent.com/api-evangelist/avito/refs/heads/main/openapi/avito-item-api-openapi.yml).
-
-## Backfill, rate limit и recovery
-
-Экспортёр автоматически строит всю сетку доступной истории. Перед запросом окна
-он проверяет атомарный checkpoint в `index/recovery.sqlite3`. Завершённые окна
-не запрашиваются повторно; прерванный экспорт продолжает с первого отсутствующего
-окна. Нормализованные записи имеют поля `source_endpoint`, `window_from`,
-`window_to`, `grouping_type`, `record_id`, `metric`, `value`, `fetched_at` и
-защищены составным первичным ключом от дублей.
-
-Каждый HTTP-ответ, включая 4xx/429/5xx и повторные попытки, записывается байт-в-байт
-в `raw/requests/`; успешные ответы статистики дополнительно лежат в
-`raw/statistics/`. Checkpoint окна и нормализованные записи фиксируются одной
-SQLite-транзакцией только после полного разбора и всей пагинации.
-
-Между запросами статистики выдерживается интервал 60 секунд. HTTP 429 учитывает
-`Retry-After` и `X-RateLimit-Retry-After`; 5xx и сетевые ошибки имеют ограниченные
-повторы с backoff. Постоянные 4xx не повторяются. После первой ошибки семейства
-endpoint текущий запуск переходит к другому семейству, чтобы не создать сотни
-одинаковых запросов; resume позже повторит первый недостающий период.
-
-## Статусы
-
-- `completed` — все выбранные стадии завершены;
-- `partial` — часть выбранных данных недоступна, ответ повреждён или исчерпаны
-  повторы; доступные RAW и индексы сохранены;
-- `failed` — ключевой этап, например подключение или определение аккаунта, не выполнен;
-- `interrupted` — остановлено пользователем или процессом; архив можно продолжить.
-
-Документированные горизонты 270/270 дней означают всю доступную API историю и
-сами по себе не делают результат `partial`.
-
-## Структура архива
+Each export creates a private archive directory:
 
 ```text
 exports/
@@ -118,52 +67,27 @@ exports/
     │   ├── ratings/
     │   └── statistics/
     ├── index/
-    │   ├── recovery.sqlite3
-    │   └── statistics/catalog.json
     ├── media/
     ├── analysis_ready/
     └── logs/
 ```
 
-Каждый тематический RAW-файл имеет `*.meta.json` с методом, URL, телом запроса
-в поле `params`, HTTP-статусом, очищенными заголовками, размером и SHA-256.
-Authorization, cookies, OAuth-токен и тело ответа `/token` не архивируются.
+`raw/` contains original API responses. Each saved response also has metadata
+with HTTP method, URL, parameters or request body, status code, redacted headers,
+size, and SHA-256. OAuth response bodies, access tokens, cookies, and Client
+Secrets are not archived.
 
-## Запуск на Windows
+## AI-ready Export
 
-Требуется Python 3.11 или новее. Дважды нажмите `run_windows.bat`: скрипт создаст
-локальное окружение, установит зависимости и откроет UI. Вручную из исходников:
-
-```bash
-python -m pip install -e .
-python -m avito_raw_export
+```text
+Avito Business API
+→ RAW archive
+→ analysis_ready
+→ ChatGPT / Claude / DeepSeek / local LLM / custom analytics
 ```
 
-UI доступен только локально: `http://127.0.0.1:8765`.
-
-## Выгрузка истории переписок
-
-1. Запустите `run_windows.bat`.
-2. Введите название профиля, Client ID и Client Secret приложения Avito Business
-   API и нажмите «Проверить подключение».
-3. Сохраните профиль. Client Secret попадёт в системное хранилище Windows, а не
-   в проект.
-4. Выберите папку вне репозитория.
-5. Оставьте включёнными «Чаты и сообщения». Остальные флажки по умолчанию выключены.
-6. Нажмите «Выгрузить историю переписок».
-7. Для новой чистой выгрузки не выбирайте старый архив.
-8. Дождитесь `completed` либо изучите `partial` в `logs/issues.jsonl` и
-   `index/issue_summary.json`. При остановке нажмите «Продолжить последнюю выгрузку».
-9. После выгрузки нажмите «Подготовить для анализа». UI создаст локальную папку
-   `analysis_ready/` внутри этого архива без новых запросов к Avito.
-
-## Analysis-ready export
-
-`analysis_ready/` — производный слой для чтения и анализа уже сохранённой
-истории переписок. RAW-архив остаётся источником истины: файлы в `raw/` не
-изменяются, не удаляются и не перезаписываются.
-
-Структура:
+`analysis_ready/` is generated locally from an existing archive. It does not make
+new Avito API requests and does not modify `raw/`.
 
 ```text
 analysis_ready/
@@ -180,52 +104,89 @@ analysis_ready/
 └── README.txt
 ```
 
-`conversations.jsonl` — главный компактный AI-ready артефакт: одна строка JSON =
-одна полная переписка с контекстом объявления, без тяжёлого RAW-шумa, аватаров,
-полных профилей пользователей и полного объекта чата. Каждый conversation
-самодостаточен: внутри есть `conversation_type`, `chat_id`, `item_id`, доступные
-поля объявления, период, счётчики и все сообщения по порядку.
-`conversation_type` принимает значения `customer_item`, `avito_system`,
-`avito_support` или `other`, чтобы перед анализом можно было отфильтровать
-системные и support-переписки. `items.json` остаётся общим справочником
-объявлений. `conversations_index.csv` помогает быстро фильтровать корпус по типу,
-ID, объявлению, периоду и количеству сообщений. Полные
-`conversations/conversation_<safe_id>.json` сохраняются отдельно для аудита и
-точечной перепроверки. `human_readable/*.txt` хранит те же переписки в читаемом
-виде, который удобно загружать в ChatGPT.
+`conversations.jsonl` is the main compact LLM artifact. One JSON line equals one
+complete conversation with listing context, period, counts, and ordered messages.
+It avoids heavy RAW noise such as avatars, full public profiles, full chat
+objects, preview image variants, and repeated content structures.
 
-Сообщения собираются из всех сохранённых RAW-страниц `raw/messages/`, одинаковые
-`message_id` не дублируются, порядок выставляется по timestamp. Роли в JSONL:
-`client`, `seller`, `avito_system`, `unknown`. Системные сообщения Avito,
-включая `author_id=0`, не маркируются как `client`. Для нетекстовых сообщений
-сохраняется компактный признак `has_media`, а в TXT используются плейсхолдеры
-вроде `[изображение]`, `[голосовое]`, `[системное сообщение]`; бинарные файлы в
-TXT не вставляются.
+`conversations_index.csv` is for filtering the corpus before analysis. The
+`conversation_type` column can be:
 
-`analysis_ready/` содержит приватные переписки и исключён из Git.
+- `customer_item` — a customer conversation about a listing;
+- `avito_system` — an Avito system conversation;
+- `avito_support` — Avito support;
+- `other` — anything that cannot be classified from structured fields.
 
-Синтетические тесты проверяют контракт, пагинацию, ошибки и recovery. Read-only
-live-проверка подтверждает успешные ответы обоих методов статистики без
-агентского заголовка; приватные ответы и идентификаторы в репозиторий не входят.
+For business analysis, start with `customer_item` rows. Full
+`conversations/conversation_<safe_id>.json` files remain available for audit and
+technical checks.
 
-## Ограничения Avito API
+## Read-only And Safety
 
-- Статистику объявлений и расходов старше 270 дней API не отдаёт.
-- Недоступные клиенту метрики отсутствуют в ответе; экспортёр не выдумывает их.
-- Отдельного подтверждённого счётчика звонков текущий Statistics API не описывает.
-- Исторические чаты и сообщения ограничены тем, что возвращает Messenger API;
-  его offset-предел не позволяет доказать абсолютную полноту изменяемой выдачи.
-- Архив не является транзакционным снимком: данные Avito могут меняться во время обхода.
-- Права сотрудника или приложения могут скрывать часть корпоративного аккаунта.
+The API client only allows explicit read-only endpoints. Messenger write actions
+such as sending messages, marking chats as read, deleting messages, blacklist
+actions, webhooks, and listing updates are not implemented and are blocked by the
+endpoint allowlist.
 
-## Профили, безопасность и сборка
+Profiles are local. Client Secrets are stored in the operating system keyring.
+The UI binds to `127.0.0.1` only. Export archives can contain personal and
+business data, so keep them outside the repository and do not publish them.
 
-Можно хранить несколько профилей без изменения кода. Название и Client ID лежат
-в локальном конфиге пользователя, Client Secret — в OS keyring. Архивы содержат
-PII и бизнес-данные без шифрования: храните их вне checkout и не публикуйте.
+The repository uses a deny-by-default `.gitignore`, local Git hooks, and CI
+checks to reject credentials, JSON/CSV exports, logs, SQLite databases, media,
+archives, and unexpected public files.
 
-`.gitignore` использует allowlist публичных файлов. Hooks и CI отклоняют секреты,
-JSON/CSV/логи, SQLite, медиа, архивы и неожиданные пути. Подробнее:
-[SECURITY.md](SECURITY.md) и [AUDIT.md](AUDIT.md).
+## Limitations
 
-Windows-сборка: `build_windows.bat`. Лицензия: MIT.
+- Avito API only returns data available to the authenticated application and
+  account permissions.
+- Historical chats and messages are limited by Messenger API pagination and
+  availability.
+- Exports are not transactional snapshots; Avito data can change during a run.
+- Statistics API history is limited by Avito's documented retention windows.
+- Some media URLs may be temporary or unavailable by the time they are downloaded.
+- Disabled optional modules are not exported and do not affect export status.
+
+## Optional Modules
+
+The default workflow exports chat and message history. The UI can also enable:
+
+- reviews and rating;
+- historical item/account statistics and spendings;
+- Avito-hosted images and other media;
+- voice file link lookup and voice downloads.
+
+Statistics use Avito Statistics API v2 read-only POST endpoints:
+
+- `POST /stats/v2/accounts/{user_id}/items`;
+- `POST /stats/v2/accounts/{user_id}/spendings`.
+
+Statistics requests are rate-limited, checkpointed, and resumable. Successful
+responses are saved in `raw/statistics/`; all attempts are preserved in
+`raw/requests/`.
+
+## Developer Notes
+
+Install development dependencies and run checks:
+
+```bash
+python -m pip install -e .[dev]
+python -m ruff check src tests scripts
+python -m pytest -q
+python scripts/check_public.py HEAD
+```
+
+Enable local publication hooks in a clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Windows build:
+
+```bash
+build_windows.bat
+```
+
+See [SECURITY.md](SECURITY.md) for the publication policy and [AUDIT.md](AUDIT.md)
+for a neutral technical checklist.
